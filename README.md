@@ -3,6 +3,17 @@ Contest Management System
 
 Homepage: <http://cms-dev.github.io/>
 
+This repository is a fork of <https://github.com/cms-dev/cms>.
+
+Custom changes in this fork
+---------------------------
+
+- Contest web server UI redesign for the contest listing, task description, submissions, and login pages.
+- Built-in contest submission code editor with language selection and file/code toggle.
+- Admin web server CSV user upload flow with generated usernames and secure random passwords.
+- Ranking web server updates for multi-contest mode with a contest selector dropdown.
+- Deployment-specific fixes for cache busting and service binding in this environment.
+
 [![Build Status](https://github.com/cms-dev/cms/actions/workflows/main.yml/badge.svg)](https://github.com/cms-dev/cms/actions)
 [![Codecov](https://codecov.io/gh/cms-dev/cms/branch/master/graph/badge.svg)](https://codecov.io/gh/cms-dev/cms)
 [![Get support on Telegram](https://img.shields.io/badge/Questions%3F-Join%20the%20Telegram%20group!-%2326A5E4?style=flat&logo=telegram)](https://t.me/contestms)
