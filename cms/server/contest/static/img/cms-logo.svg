@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="48" viewBox="0 0 220 48" role="img" aria-labelledby="title desc">
+  <title id="title">CMS Contest Portal</title>
+  <desc id="desc">CMS logo for contest web pages.</desc>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0e4b8f" />
+      <stop offset="100%" stop-color="#1a7dcf" />
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="46" height="46" rx="8" fill="url(#g)" />
+  <path d="M14 16h20v4H18v8h14v4H14z" fill="#ffffff" />
+  <circle cx="30" cy="32" r="3" fill="#9fe0ff" />
+  <text x="56" y="22" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#1e2a39">CMS</text>
+  <text x="56" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#4a5a6a">Contest Portal</text>
+</svg>

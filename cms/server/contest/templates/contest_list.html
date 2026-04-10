@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}
+    {% trans %}Choose a contest{% endtrans %}
+{% endblock title %}
+{% block body %}
+    <div class="contest-list-page">
+        <div class="contest-bg-glow contest-bg-glow-a"></div>
+        <div class="contest-bg-glow contest-bg-glow-b"></div>
+
+        <main class="contest-shell" role="main">
+            <a href="{{ url() }}" class="contest-brand" aria-label="CMS Home">
+                <img src="{{ url("static", "img", "cms-logo.svg") }}" alt="CMS Contest Portal logo" class="contest-brand-image" />
+            </a>
+            <section class="contest-hero">
+                <p class="contest-kicker">CMS</p>
+                <h1>{% trans %}Choose a contest{% endtrans %}</h1>
+                <p class="contest-subtitle">{% trans %}Select an event to enter your dashboard and start competing.{% endtrans %}</p>
+            </section>
+
+            <section class="contest-grid" aria-label="{% trans %}Contest list{% endtrans %}">
+            {% for c_name, c_iter in contest_list|dictsort(by="key") %}
+                <a class="contest-card {% if c_iter.stop < now %}contest-card-archived{% endif %}" href="{{ url(c_iter.name) }}">
+                    <div class="contest-card-head">
+                        <h2>{{ c_iter.description }}</h2>
+                        {% if c_iter.stop < now %}
+                            <span class="contest-badge contest-badge-archived">{% trans %}Archived{% endtrans %}</span>
+                        {% else %}
+                            <span class="contest-badge contest-badge-open">{% trans %}Open{% endtrans %}</span>
+                        {% endif %}
+                    </div>
+                    <p class="contest-slug">{{ c_name }}</p>
+                    <span class="contest-enter">{% trans %}Enter contest{% endtrans %} →</span>
+                </a>
+            {% else %}
+                <div class="contest-empty">
+                    <h2>{% trans %}No contests available{% endtrans %}</h2>
+                    <p>{% trans %}Ask an administrator to import or create a contest.{% endtrans %}</p>
+                </div>
+            {% endfor %}
+            </section>
+        </main>
+    </div>
+{% endblock body %}
