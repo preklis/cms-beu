@@ -71,12 +71,23 @@ class CMSWatchdog:
     def is_resource_service_healthy(self):
         """Check if ResourceService is running and responsive"""
         try:
-            response = urllib.request.urlopen(
-                f'http://127.0.0.1:{RESOURCE_SERVICE_PORT}/ping',
-                timeout=2
-            )
-            return response.status == 200
-        except (urllib.error.URLError, urllib.error.HTTPError, Exception):
+            # First try HTTP check on configured port
+            try:
+                response = urllib.request.urlopen(
+                    f'http://127.0.0.1:{RESOURCE_SERVICE_PORT}/ping',
+                    timeout=2
+                )
+                return response.status == 200
+            except (urllib.error.URLError, urllib.error.HTTPError):
+                # If HTTP check fails, check if process is running
+                # This gives ResourceService time to fully initialize
+                result = subprocess.run(
+                    ['pgrep', '-f', 'cmsResourceService'],
+                    capture_output=True,
+                    timeout=2
+                )
+                return result.returncode == 0
+        except (Exception,):
             return False
 
     def is_ranking_service_healthy(self):
