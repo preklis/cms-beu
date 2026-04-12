@@ -296,6 +296,7 @@ class ProxyService(TriggeredService):
         # sending it twice.
         self.scores_sent_to_rankings = set()
         self.tokens_sent_to_rankings = set()
+        self.visible_user_keys = set()
 
         # Create one executor for each ranking.
         self.rankings = list()
@@ -396,6 +397,7 @@ class ProxyService(TriggeredService):
             users = dict()
             teams = dict()
             tasks = dict()
+            visible_user_keys = set()
 
             for contest in contests:
                 contest_key = self._contest_key(contest)
@@ -419,6 +421,7 @@ class ProxyService(TriggeredService):
                         "team": self._team_key(contest, team)
                         if team is not None else None,
                     }
+                    visible_user_keys.add(self._user_key(contest, user))
                     if team is not None:
                         teams[self._team_key(contest, team)] = {
                             "name": team.name
@@ -442,6 +445,7 @@ class ProxyService(TriggeredService):
         self.enqueue(ProxyOperation(ProxyExecutor.TEAM_TYPE, teams))
         self.enqueue(ProxyOperation(ProxyExecutor.USER_TYPE, users))
         self.enqueue(ProxyOperation(ProxyExecutor.TASK_TYPE, tasks))
+        self.visible_user_keys = visible_user_keys
 
     def operations_for_score(self, submission):
         """Send the score for the given submission to all rankings.
@@ -455,8 +459,14 @@ class ProxyService(TriggeredService):
         # Data to send to remote rankings.
         submission_id = "%d" % submission.id
         contest = submission.task.contest
+        user_key = self._user_key(contest, submission.participation.user)
+        if user_key not in self.visible_user_keys:
+            logger.debug("Skipping submission %d for non-visible user %s.",
+                         submission.id, user_key)
+            return []
+
         submission_data = {
-            "user": self._user_key(contest, submission.participation.user),
+            "user": user_key,
             "task": self._task_key(contest, submission.task),
             "time": int(make_timestamp(submission.timestamp))}
 
@@ -490,8 +500,14 @@ class ProxyService(TriggeredService):
         # Data to send to remote rankings.
         submission_id = "%d" % submission.id
         contest = submission.task.contest
+        user_key = self._user_key(contest, submission.participation.user)
+        if user_key not in self.visible_user_keys:
+            logger.debug("Skipping token for submission %d with non-visible user %s.",
+                         submission.id, user_key)
+            return []
+
         submission_data = {
-            "user": self._user_key(contest, submission.participation.user),
+            "user": user_key,
             "task": self._task_key(contest, submission.task),
             "time": int(make_timestamp(submission.timestamp))}
 
