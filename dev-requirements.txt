@@ -1,5 +1,5 @@
 # Only for testing
-beautifulsoup4>=4.8,<4.14
+beautifulsoup4>=4.15.0,<4.16
 coverage>=4.5,<7.9
 pytest
 pytest-cov
