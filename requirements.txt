@@ -6,7 +6,7 @@ pycryptodomex==3.23.0  # https://github.com/Legrandin/pycryptodome/blob/master/C
 psutil>=5.5,<7.1  # https://github.com/giampaolo/psutil/blob/master/HISTORY.rst
 requests==2.32.3  # https://pypi.python.org/pypi/requests
 gevent==25.5.1  # http://www.gevent.org/changelog.html
-greenlet>=3.0rc1
+greenlet>=3.5.3
 werkzeug<1.0 # https://github.com/pallets/werkzeug/blob/master/CHANGES
 backports.ssl-match-hostname==3.7.0.1 # required by tornado<5.0
 patool>=1.12,<4.1  # https://github.com/wummel/patool/blob/master/doc/changelog.txt
