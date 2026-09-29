@@ -1,0 +1,694 @@
+CMS-BEU(1)                    CMS for BEU - Command Manual                    CMS-BEU(1)
+
+NAME
+    cms-beu - Contest Management System (BEU fork): services and admin commands
+
+TABLE OF CONTENTS
+    1.  Overview and quick start
+    2.  Common conventions (config files, shards, contest ids, logs)
+    3.  Services
+          cmsLogService, cmsResourceService, cmsScoringService,
+          cmsEvaluationService, cmsWorker, cmsChecker, cmsContestWebServer,
+          cmsAdminWebServer, cmsProxyService, cmsRankingWebServer,
+          cmsPrintingService, cmsPrometheusExporter, cmsTelegramBot
+    4.  Watchdog (BEU fork)
+          cms-watchdog.py, cms-watchdog-util
+    5.  Database
+          cmsInitDB, cmsDropDB, cmsDumpExporter, cmsDumpImporter,
+          cmsDumpUpdater, cmsCleanFiles
+    6.  Contests, tasks and datasets
+          cmsImportContest, cmsImportTask, cmsImportDataset, cmsAddStatement,
+          cmsAddTestcases, cmsRemoveContest, cmsRemoveTask, cmsMake
+    7.  Users, teams and participations
+          cmsAddAdmin, cmsAddUser, cmsImportUser, cmsRemoveUser, cmsAddTeam,
+          cmsImportTeam, cmsAddParticipation, cmsRemoveParticipation
+    8.  Submissions
+          cmsAddSubmission, cmsRemoveSubmissions, cmsExportSubmissions,
+          cmsSpoolExporter
+    9.  Ranking tools
+          cmsRWSHelper
+    10. Testing
+          cmsRunFunctionalTests
+    11. Contestant web interface: code editor (BEU fork)
+    12. Files and environment
+    13. Troubleshooting
+
+Every command accepts -h / --help, which prints its options. This manual
+describes those options and adds context and examples.
+
+
+==============================================================================
+1. OVERVIEW AND QUICK START
+==============================================================================
+
+    CMS is made of several services that talk to each other over RPC. All of
+    them read the same configuration file, cms.conf. A typical single-machine
+    setup looks like this:
+
+        PostgreSQL <-- every service and command
+        cmsLogService          collects the logs of all the other services
+        cmsResourceService     starts (-a) and monitors the services below
+          cmsScoringService, cmsEvaluationService, cmsWorker(s),
+          cmsContestWebServer, cmsAdminWebServer, cmsProxyService,
+          cmsChecker, cmsPrintingService
+        cmsRankingWebServer    public scoreboard (separate config file)
+        cms-watchdog.py        keeps ranking + proxy alive (BEU fork)
+
+    First-time setup:
+
+        cmsInitDB                                    # create the schema
+        cmsAddAdmin -p 'S3cret!' admin               # admin account
+        cmsImportContest -i /path/to/contest         # contest + tasks
+        cmsImportUser -A -c 1 /path/to/contest       # users (or: Admin web UI)
+
+    Running a contest (contest id 1):
+
+        cmsLogService 0 &
+        cmsResourceService -a 1 &      # starts every service for contest 1
+        cmsRankingWebServer &          # or let the watchdog start it
+        python3 scripts/cms-watchdog.py -c 1 &   # optional, see section 4
+
+    Multi-contest mode: pass "ALL" instead of a contest id (for example,
+    "cmsResourceService -a ALL" or "cmsContestWebServer -c ALL"). The
+    contest server then shows a contest list, and every contest is served
+    under /<contest_name>/.
+
+    Default web addresses (see cms.conf and cms.ranking.conf):
+        contestants   http://<host>:8888/
+        admins        http://<host>:8889/
+        ranking       http://<host>:8890/
+
+
+==============================================================================
+2. COMMON CONVENTIONS
+==============================================================================
+
+CONFIGURATION FILES
+    cms.conf is looked up, in this order, at:
+        $CMS_CONFIG
+        /usr/local/etc/cms.conf
+        /etc/cms.conf
+    cmsRankingWebServer reads cms.ranking.conf in the same places, with the
+    CMS_RANKING_CONFIG environment variable instead of CMS_CONFIG. The
+    commented samples are in config/cms.conf.sample and
+    config/cms.ranking.conf.sample.
+
+    The fork-specific limits in cms.conf that matter for the web code editor
+    are:
+        max_submission_length   maximum total size of a submission (bytes)
+        max_input_length        maximum size of a custom test input (bytes)
+
+SHARD
+    Most services take an optional positional argument, SHARD. It is the
+    index of this instance in the service's list of addresses in cms.conf
+    (for example, "Worker": [["localhost", 26000], ["localhost", 26001]]
+    defines shards 0 and 1). If you omit it, CMS picks the shard whose
+    address matches one of the machine's IP addresses. If none match, the
+    service refuses to start.
+
+CONTEST ID (-c / --contest-id)
+    Services that serve a contest accept -c ID or -c ALL. If you omit it, the
+    service lists the contests and asks you to pick one interactively. Some
+    services show "(ignored)" in their help text: they accept the flag only
+    so that ResourceService can start every service with the same command
+    line.
+    To find contest ids, look at the admin web interface (the id is in the
+    URL: /contest/<id>), or use the interactive prompt.
+
+LOGS
+    Each service writes to /var/local/log/cms/<Service>-<shard>/ and also
+    sends its logs to cmsLogService, which collects them in
+    /var/local/log/cms/LogService-0/. The watchdog writes to
+    /var/local/log/cms/watchdog.log.
+
+EXIT STATUS
+    Admin commands exit with 0 on success and a non-zero value on failure.
+    Services run until they are stopped with SIGINT or SIGTERM.
+
+
+==============================================================================
+3. SERVICES
+==============================================================================
+
+cmsLogService [-c ID] [SHARD]
+    Central log collector. Start it first, since every other service sends
+    its logs to it. -c is ignored.
+        cmsLogService 0
+
+cmsResourceService [-a [ID|ALL]] [SHARD]
+    Monitors the machine's resources (CPU, memory, disk) and the services
+    configured on it, and reports them to the admin interface.
+      -a, --autorestart [ID|ALL]
+            Also start every service that cms.conf assigns to this machine,
+            and restart any that die. With no value, it asks which contest
+            to use. ALL runs in multi-contest mode.
+    Notes: ResourceService never starts cmsLogService, itself, or
+    cmsRankingWebServer (the ranking is not a CMS core service). In ALL
+    mode it does not start ProxyService either, because ProxyService needs
+    a contest id there. Use the watchdog (section 4) to run and supervise
+    the ranking and a multi-contest ProxyService ("-c ALL").
+        cmsResourceService -a 1
+        cmsResourceService -a ALL
+
+cmsScoringService [-c ID] [SHARD]
+    Computes the scores of evaluated submissions and notifies ProxyService.
+    -c is ignored (it scores all contests).
+
+cmsEvaluationService [-c ID|ALL] [SHARD]
+    Queues compilations and evaluations of submissions and user tests and
+    dispatches them to the Workers.
+        cmsEvaluationService -c ALL
+
+cmsWorker [-c ID] [SHARD]
+    Compiles and runs code inside the isolate sandbox. Run one Worker per
+    CPU core that you set aside for evaluation, each with its own shard.
+    -c is ignored. Requires isolate (see isolate/ and
+    config/isolate.conf.sample).
+        cmsWorker 0 & cmsWorker 1 &
+
+cmsChecker [-c ID] [SHARD]
+    Periodically checks that the other services are alive and tells
+    EvaluationService to re-check for work it may have missed. -c is
+    ignored.
+
+cmsContestWebServer [-c ID|ALL] [SHARD]
+    The contestants' web interface: statements, submissions, the code
+    editor (section 11), testing, questions, announcements and printing.
+    Listens on contest_listen_address/contest_listen_port from cms.conf
+    (port 8888 by default; with several shards, the i-th port).
+        cmsContestWebServer -c 1
+        cmsContestWebServer -c ALL       # contest list at /
+
+cmsAdminWebServer [-c ID] [SHARD]
+    The administrators' web interface, on port 8889 by default. It includes
+    the BEU CSV user upload, which generates usernames and secure random
+    passwords. -c is ignored. Log in with an account created by
+    cmsAddAdmin.
+
+cmsProxyService [-c ID|ALL] [SHARD]
+    Sends contests, tasks, users, teams, scores and tokens to the ranking
+    servers listed in "rankings" in cms.conf. At startup, and every few
+    minutes afterwards, it replays everything the rankings are missing, so
+    a ranking that was down catches up by itself.
+    BEU fork behaviour:
+      - If a ranking is unreachable, times out or answers 5xx, the data is
+        queued again and retried every 60 s. It is no longer lost until the
+        next restart.
+      - Data that the ranking rejects (4xx) is logged and dropped, so that
+        it cannot block everything else.
+      - Users added while the contest is running are sent to the ranking
+        together with their first scored submission.
+      - With -c ALL, keys are prefixed with the contest name, and the
+        ranking shows a contest selector.
+        cmsProxyService -c ALL 0
+
+cmsRankingWebServer [--config FILE] [-d] [-y]
+    The public scoreboard. It stores its data in lib_dir (from
+    cms.ranking.conf) and receives updates from ProxyService over HTTP
+    with basic auth. The username and password in cms.ranking.conf must
+    match the URL in cms.conf "rankings".
+      --config FILE   use FILE instead of the default cms.ranking.conf
+      -d, --drop      delete all stored ranking data before starting
+      -y, --yes       with -d: do not ask for confirmation
+    Example (clean restart before a new contest):
+        cmsRankingWebServer -d -y
+
+cmsPrintingService [-c ID] [SHARD]
+    Sends the contestants' print jobs to a CUPS printer. It is active only
+    if "printer" is set in cms.conf, and it needs the pycups Python module.
+
+cmsPrometheusExporter [--host HOST] [--port PORT] [--no-submissions]
+                      [--no-workers] [--no-queue] [--no-communications]
+                      [--no-users] [-c X] SHARD
+    Exposes CMS metrics for Prometheus on HOST:PORT. Each --no-* flag
+    turns off one group of metrics. SHARD and -c are unused, but SHARD
+    must be given.
+        cmsPrometheusExporter --host 127.0.0.1 --port 8811 0
+
+cmsTelegramBot [-c ID|ALL] [SHARD]
+    Forwards contestants' questions to a Telegram chat and posts replies and
+    announcements. It needs telegram_bot_token and telegram_bot_chat_id in
+    cms.conf. With ALL, announcements are ignored.
+
+
+==============================================================================
+4. WATCHDOG (BEU FORK)
+==============================================================================
+
+NAME
+    cms-watchdog.py - keep cmsRankingWebServer and cmsProxyService running
+
+SYNOPSIS
+    python3 scripts/cms-watchdog.py [run|status] [options]
+
+DESCRIPTION
+    The run command (the default) checks both services every --interval
+    seconds and:
+      - restarts a service whose process died;
+      - kills (SIGTERM, then SIGKILL) and restarts a service that is still
+        running but has failed --max-failed-checks checks in a row (hung);
+      - spaces restarts of a crashing service with exponential backoff,
+        from --backoff-min to --backoff-max seconds;
+      - starts nothing while ResourceService is unreachable;
+      - leaves alone instances that someone else started. It does not start
+        a duplicate of a healthy instance, and it does not kill an
+        unhealthy one, but it logs a warning.
+    Health checks:
+      ranking   HTTP GET <ranking-url>/contests/. Any answer below 500
+                counts as healthy.
+      proxy     TCP connect to the ProxyService address in cms.conf.
+      resource  TCP connect to the ResourceService address in cms.conf, or
+                a running cmsResourceService process.
+    On SIGTERM or SIGINT, the watchdog stops the services it started,
+    unless you pass --keep-services.
+
+    The status command prints one line per service and exits with 0 if all
+    of them are up and 1 otherwise. You can use it from scripts and
+    monitoring.
+
+OPTIONS
+    --cms-home DIR          CMS checkout. The watchdog runs scripts/cms* from
+                            here if they exist, else the commands on PATH.
+                            Default: $CMS_HOME, else the parent directory of
+                            the script's own directory.
+    --config FILE           cms.conf to read addresses from. Default:
+                            $CMS_CONFIG, /usr/local/etc/cms.conf,
+                            /etc/cms.conf.
+    --ranking-url URL       ranking to probe. Default: the first "rankings"
+                            URL in cms.conf, or $CMS_WATCHDOG_RANKING_URL.
+    -c, --contest ID|ALL    contest for ProxyService (default: ALL, or
+                            $CMS_WATCHDOG_CONTEST).
+    --log-dir DIR           watchdog.log, ranking.log and proxy.log go here
+                            (default: /var/local/log/cms, or
+                            $CMS_WATCHDOG_LOG_DIR).
+    --interval SEC          seconds between checks (default: 15, or
+                            $CMS_WATCHDOG_INTERVAL).
+    --max-failed-checks N   failed checks before a running service counts as
+                            hung (default: 4).
+    --grace SEC             time a new process has to become healthy
+                            (default: 30).
+    --backoff-min SEC       first restart delay (default: 5).
+    --backoff-max SEC       maximum restart delay (default: 300).
+    --stable-after SEC      healthy time after which the backoff resets
+                            (default: 600).
+    --stop-timeout SEC      wait after SIGTERM before SIGKILL (default: 15).
+    --http-timeout SEC      timeout of the ranking probe (default: 5).
+    --no-ranking            do not manage cmsRankingWebServer.
+    --no-proxy              do not manage cmsProxyService.
+    --keep-services         leave the services running when the watchdog
+                            exits.
+    -v, --verbose           debug logging.
+
+EXAMPLES
+    python3 scripts/cms-watchdog.py status
+    python3 scripts/cms-watchdog.py -c 1 --interval 10
+    python3 scripts/cms-watchdog.py --no-ranking      # proxy only
+
+    To run it under systemd:
+        sudo cp config/cms-watchdog.service.sample \
+                /etc/systemd/system/cms-watchdog.service
+        sudoedit /etc/systemd/system/cms-watchdog.service  # User=, paths
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now cms-watchdog
+
+NAME
+    cms-watchdog-util - shortcuts for the cms-watchdog systemd service
+
+SYNOPSIS
+    scripts/cms-watchdog-util COMMAND [N]
+
+COMMANDS
+    status            systemd status plus "cms-watchdog.py status"
+    health            only "cms-watchdog.py status" (exit code 0 = all up)
+    logs [N]          last N lines of watchdog.log (default: 50)
+    follow            follow watchdog.log (tail -F)
+    service-logs [N]  last N lines of ranking.log and proxy.log
+    start | stop | restart | enable | disable
+                      run "sudo systemctl <command> cms-watchdog"
+    Environment: CMS_WATCHDOG_UNIT (default: cms-watchdog) and
+    CMS_WATCHDOG_LOG_DIR.
+    If you install it in /usr/local/bin, use a symlink so that it can find
+    cms-watchdog.py next to its real location.
+
+
+==============================================================================
+5. DATABASE
+==============================================================================
+
+cmsInitDB
+    Creates the CMS schema in the (empty) database configured in cms.conf.
+    It is not idempotent: run it only once, on an empty database.
+
+cmsDropDB [-y]
+    DELETES EVERYTHING in the CMS database: data and schema, including any
+    other data stored in the same database.
+      -y, --yes   do not ask for confirmation
+        cmsDropDB && cmsInitDB           # start from scratch
+
+cmsDumpExporter [-c ID [ID ...]] [-f | -F] [-G] [-S] [-U] [-X] [-P] [TARGET]
+    Exports the database (and the files it references) to a directory or
+    to an archive (.zip, .tar, .tar.gz or .tar.bz2). Use it for backups and
+    for moving data between machines.
+      -c, --contest-ids ID...   only these contests
+      -f, --files               only files, no database structure
+      -F, --no-files            only the database structure, no files
+      -G, --no-generated        skip data that can be regenerated
+                                (compilations, evaluations, ...)
+      -S, --no-submissions      skip submissions
+      -U, --no-user-tests       skip user tests
+      -X, --no-users            skip users
+      -P, --no-print-jobs       skip print jobs
+        cmsDumpExporter /backups/cms-$(date +%F).tar.gz
+        cmsDumpExporter -c 3 -G /tmp/contest3.zip
+
+cmsDumpImporter [-d] [-f | -F] [-G] [-S] [-U] [-X] [-P] SOURCE
+    Imports a dump made by cmsDumpExporter (a directory or an archive).
+      -d, --drop   drop everything in the database first
+      The other flags work as in cmsDumpExporter, for import.
+        cmsDumpImporter -d /backups/cms-2026-09-29.tar.gz
+
+cmsDumpUpdater [-V VERSION] PATH
+    Converts an old dump (a directory, or its contest.json) to the current
+    schema version, or to VERSION if you give -V. Run it before
+    cmsDumpImporter when the dump comes from an older CMS.
+
+cmsCleanFiles [-t] [-n]
+    Deletes stored files that nothing in the database references anymore.
+      -t, --tombstone   also replace all stored executables with a
+                        tombstone to save space (they are recompiled if
+                        needed)
+      -n, --dry-run     only report what would be deleted
+
+
+==============================================================================
+6. CONTESTS, TASKS AND DATASETS
+==============================================================================
+
+    Loaders (the -L option): italy_yaml, polygon_contest, polygon_task,
+    polygon_user, tps_task. If you omit -L, CMS detects the format.
+
+cmsImportContest [-y] [-z] [-L LOADER] [-i] [-u] [-U] [-S]
+                 [--delete-stale-participations] DIRECTORY
+    Imports a contest (and optionally its tasks and users) from DIRECTORY.
+      -y, --yes             do not ask before deleting data
+      -z, --zero-time       set the contest start and stop to the epoch
+                            (useful for tests)
+      -L, --loader LOADER   force a loader
+      -i, --import-tasks    import tasks that are not in the database yet
+      -u, --update-contest  update a contest that already exists
+      -U, --update-tasks    update tasks that already exist
+      -S, --no-statements   do not import or update the statements
+      --delete-stale-participations
+                            when updating, delete the participations that
+                            are no longer in the contest, including their
+                            SUBMISSIONS
+    When you update, tasks that are no longer in the contest are detached.
+    Participations are kept unless you pass the last flag.
+        cmsImportContest -i ./beu-round1
+        cmsImportContest -u -U ./beu-round1        # re-import after edits
+
+cmsImportTask [-L LOADER] [-u] [-S] [-c ID] [-p PREFIX] [-n NAME] TARGET
+    Imports or updates one task.
+      -u, --update        update the task if it exists
+      -S, --no-statement  do not import or update the statement
+      -c, --contest-id ID attach the task to this contest
+      -p, --prefix PREFIX prepend PREFIX to the task name
+      -n, --name NAME     use NAME as the task name
+        cmsImportTask -c 1 ./tasks/sum
+
+cmsImportDataset [-L LOADER] TARGET
+    Adds a new dataset (testcases and parameters) to an existing task,
+    without making it live. Activate it from the admin interface after you
+    check the results.
+
+cmsAddStatement [-o] TASK_NAME LANGUAGE_CODE FILE
+    Adds a statement (usually a PDF) in the given language (for example
+    en, az, tr) to a task.
+      -o, --overwrite   replace an existing statement in that language
+        cmsAddStatement sum az sum-az.pdf
+
+cmsAddTestcases [-p] [-o] [-c CONTEST_NAME] [-d DATASET] TASK ZIP IN OUT
+    Adds the testcases in ZIP to a dataset of TASK. IN and OUT are
+    templates that match the file names inside the zip. "*" stands for the
+    testcase codename.
+      -p, --public                 mark the new testcases as public
+      -o, --overwrite              overwrite testcases with the same codename
+      -c, --contest_name NAME      the contest of the task
+      -d, --dataset_description D  the dataset to use (default: the active one)
+        cmsAddTestcases -p sum tests.zip 'input*.txt' 'output*.txt'
+
+cmsRemoveContest [-c ID]
+    Removes a contest, with its participations and submissions. Tasks are
+    only detached. Asks for confirmation.
+
+cmsRemoveTask TASK_NAME
+    Removes a task, with its datasets and all its submissions.
+
+cmsMake [-D DIR] [-l] [-c] [-a] [-y | -n] [-d] [TARGET ...]
+    Builds a task in the italy_yaml format: compiles the solutions,
+    checkers and generators, and generates the testcases.
+      -D, --base-dir DIR  the task directory (default: the current one)
+      -l, --list          list the known build actions
+      -c, --clean         delete the generated files
+      -a, --all           build all targets
+      -y / -n             answer yes / no to every question
+      -d, --debug         debug messages
+
+
+==============================================================================
+7. USERS, TEAMS AND PARTICIPATIONS
+==============================================================================
+
+    Password options, shared by cmsAddUser and cmsAddParticipation:
+      -p, --plaintext-password PWD   set the password
+      -H, --hashed-password HASH     an already-hashed password (bcrypt)
+      --bcrypt                       store the password hashed with bcrypt
+                                     (recommended; otherwise plaintext)
+    If you give no password, CMS generates a random one and prints it.
+    For bulk accounts, the admin interface can also upload a CSV file
+    (BEU fork). It generates usernames and passwords for you.
+
+cmsAddAdmin [-p PASSWORD] USERNAME
+    Creates an account for the admin web interface. Without -p, it
+    generates a password and prints it.
+        cmsAddAdmin -p 'S3cret!' admin
+
+cmsAddUser [-e EMAIL] [-t TIMEZONE] [-l LANGS] [password options]
+           FIRST_NAME LAST_NAME USERNAME
+    Creates a user. A user can take part in several contests; see
+    cmsAddParticipation.
+      -e, --email EMAIL
+      -t, --timezone TZ      e.g. Asia/Baku
+      -l, --languages LIST   preferred UI languages, comma separated (az,en)
+        cmsAddUser -t Asia/Baku -p pw123 --bcrypt Ali Aliyev ali.aliyev
+
+cmsImportUser [-L LOADER] [-A] [-c ID] [TARGET]
+    Imports users from a contest or user directory.
+      -A, --all              import all the users found in TARGET
+      -c, --contest-id ID    also add them to this contest
+
+cmsRemoveUser USERNAME
+    Removes the user, with all their participations and submissions.
+
+cmsAddTeam CODE NAME
+    Creates a team (for example, a faculty or a school).
+        cmsAddTeam CS "Computer Science"
+
+cmsImportTeam [-L LOADER] [-A] [TARGET]
+    Imports teams from a directory (-A: all the teams found).
+
+cmsAddParticipation [-c ID] [-i IP] [-d SEC] [-e SEC] [-t TEAM] [--hidden]
+                    [--unrestricted] [password options] USERNAME
+    Adds an existing user to a contest.
+      -c, --contest-id ID    the contest
+      -i, --ip IP            only allow logins from this IP (or subnet)
+      -d, --delay_time SEC   shift this user's contest window by SEC
+      -e, --extra_time SEC   give this user SEC more seconds
+      -t, --team CODE        the user's team in this contest
+      --hidden               hide the user from the ranking (for staff and
+                             tests)
+      --unrestricted         ignore time and submission limits
+      A password given here overrides the user's password for this contest
+      only.
+        cmsAddParticipation -c 1 -t CS ali.aliyev
+        cmsAddParticipation -c 1 --hidden tester
+
+cmsRemoveParticipation [-c ID] USERNAME
+    Removes a user from a contest, with their submissions in that contest.
+
+
+==============================================================================
+8. SUBMISSIONS
+==============================================================================
+
+cmsAddSubmission [-c ID] -f NAME:FILE [-f ...] [-t TIMESTAMP] USERNAME TASK
+    Submits a solution on behalf of a user, for example to re-submit files
+    that a contestant sent by other means.
+      -f, --file NAME:FILE  NAME is the name in the task's submission format
+                            (e.g. "sum.%l"); repeat for multi-file tasks
+      -t, --timestamp SEC   submission time, in seconds since the epoch
+                            (default: now)
+        cmsAddSubmission -c 1 -f sum.%l:./sum.cpp ali.aliyev sum
+
+cmsRemoveSubmissions [-c ID] [-u USERNAME] [-t TASK] [-s SUBMISSION_ID]
+    Removes the submissions that match all the filters you give. Asks for
+    confirmation.
+
+cmsExportSubmissions [-c ID] [-t TASK_ID] [-u USER_ID] [-s SUB_ID] [--utf8]
+                     [--add-info] [--min-score X] [--filename FMT]
+                     [--unique | --best] OUTPUT_DIR
+    Saves submitted source files to OUTPUT_DIR (for plagiarism checks,
+    archives, and so on).
+      --utf8           re-encode the files as UTF-8 when possible
+      --add-info       add a comment header with the submission details
+      --min-score X    skip submissions that scored less than X
+      --filename FMT   file name pattern; the variables are {id} {file}
+                       {ext} {time} {user} {task} {score}
+                       (default: {id}.{file}{ext})
+      --best           only each user's best submissions for each task
+      --unique         only the earliest best submission per user and task
+        cmsExportSubmissions -c 1 --best --filename '{user}_{task}{ext}' out/
+
+cmsSpoolExporter [-c ID] DIRECTORY
+    Exports a finished contest's submissions and rankings in the "spool"
+    format of the Italian Olympiad repository.
+
+
+==============================================================================
+9. RANKING TOOLS
+==============================================================================
+
+cmsRWSHelper [-v] [-r SHARD] ACTION [FILE] TYPE ID
+    Talks directly to the ranking servers in cms.conf "rankings". Use it to
+    inspect or fix the ranking data.
+      -v, --verbose      print what is being done
+      -r, --ranking N    only ranking number N (default: all of them)
+      ACTION             get | create FILE | update FILE | delete
+      FILE               JSON body ("-" for stdin)
+      TYPE               contest | task | team | user | submission | subchange
+      ID                 the entity key. In multi-contest mode, keys look
+                         like <contest>__<name>.
+        cmsRWSHelper get user ali_2ealiyev
+        cmsRWSHelper delete user tester
+        echo '{"name": "CS"}' | cmsRWSHelper update - team CS
+
+
+==============================================================================
+10. TESTING
+==============================================================================
+
+cmsRunFunctionalTests [-l LANGS] [-c CONTEST] [-r] [-n] [-v]
+                      [--coverage FILE | --profiler yappi|kernprof] [REGEX...]
+    Runs the end-to-end test suite against a running CMS. Use a TEST
+    database, because the suite creates contests and users.
+      -l, --languages L   only these languages (comma separated)
+      -c, --contest ID    use an existing contest
+      -r, --retry-failed  rerun only the tests that failed last time
+      -n, --dry-run       list the tests without running them
+    Unit tests: "pytest cmstestsuite/unit_tests" (the database name must end
+    in "fortesting").
+
+
+==============================================================================
+11. CONTESTANT WEB INTERFACE: CODE EDITOR (BEU FORK)
+==============================================================================
+
+    On a task's "Submissions" page, contestants can choose "Upload files"
+    or "Write code". The editor is available for every task whose
+    submission files are all source files (names ending in ".%l"). On a
+    multi-file task, it shows one tab per file.
+
+    Features:
+      - syntax highlighting for every contest language (C, C++, Java, C#,
+        Python, Pascal, Rust, Haskell, PHP, Kotlin, ...), bracket matching,
+        auto-closing brackets, and toggle comment (Ctrl+/);
+      - the draft is saved in the browser as the contestant types, per
+        contest, user, task and file, so a reload, crash or accidental
+        close does not lose the code; the custom input is saved too;
+      - Open (load a local file), Save as (download), Clear, font size, and
+        a light/dark theme;
+      - a status bar with the cursor position and the size against
+        max_submission_length;
+      - Submit sends the code with the chosen language. Errors (too many
+        submissions, too frequent, too long, expired session, network
+        down) appear in the page and the code is kept;
+      - Run (Ctrl+Enter) compiles the code and runs it on the custom input
+        through the user-test system. It shows the status, time, memory,
+        the output (the first 64 KiB inline; the full output can be
+        downloaded) and the compiler messages. Runs do not count as
+        submissions, but they do count toward the user test limits.
+
+    Run appears only when:
+      - "Allow user tests" is on for the contest (admin interface), and
+      - the contest is running for that user (not in analysis mode), and
+      - the task type supports testing and needs no user-provided managers
+        (for example, a Batch task with a grader that contestants must
+        upload does not qualify).
+
+    Everything the editor needs is served locally (no CDN), so it works
+    on isolated contest networks.
+
+    Keyboard shortcuts:
+        Ctrl+Enter   run on the custom input
+        Ctrl+S       save the draft now
+        Ctrl+/       comment or uncomment the selected lines
+        Tab          indent (4 spaces); Shift+Tab to unindent
+
+
+==============================================================================
+12. FILES AND ENVIRONMENT
+==============================================================================
+
+    /usr/local/etc/cms.conf, /etc/cms.conf          main configuration
+    /usr/local/etc/cms.ranking.conf                 ranking configuration
+    /var/local/log/cms/                             logs
+    /var/local/cache/cms/                           file cache
+    /var/local/lib/cms/                             data (ranking storage,
+                                                    ...)
+    /var/local/run/cms/                             runtime files
+    config/cms-watchdog.service.sample              systemd unit (watchdog)
+
+    CMS_CONFIG               path of cms.conf
+    CMS_RANKING_CONFIG       path of cms.ranking.conf
+    CMS_HOME                 CMS checkout used by the watchdog
+    CMS_WATCHDOG_CONTEST, CMS_WATCHDOG_LOG_DIR, CMS_WATCHDOG_INTERVAL,
+    CMS_WATCHDOG_RANKING_URL, CMS_WATCHDOG_UNIT     watchdog defaults
+
+
+==============================================================================
+13. TROUBLESHOOTING
+==============================================================================
+
+    "Couldn't autodetect shard number"
+        None of this machine's IP addresses appears in the service's list
+        in cms.conf. Pass the shard explicitly (e.g. "cmsWorker 0") or fix
+        cms.conf.
+
+    Submissions stay "Compiling..." / "Evaluating..."
+        Check that cmsEvaluationService and at least one cmsWorker are
+        running and connected. The admin interface shows the queue and the
+        workers. Check isolate with "isolate --cg --init".
+
+    The ranking is empty or out of date
+        Check "python3 scripts/cms-watchdog.py status" and
+        /var/local/log/cms/proxy.log. The ranking credentials in cms.conf
+        "rankings" must match cms.ranking.conf. ProxyService re-sends
+        missing data every few minutes; restarting it resends everything
+        at once.
+
+    The code editor shows "you may have been logged out"
+        The session cookie expired, or the contest phase changed. Reload
+        the page. The draft is kept in the browser.
+
+    The code editor has no Run button
+        See the conditions in section 11 ("Allow user tests" in the admin
+        contest page).
+
+    Restoring from a backup
+        cmsDropDB -y && cmsInitDB && cmsDumpImporter BACKUP
+
+SEE ALSO
+    docs/ (the upstream documentation, https://cms.readthedocs.io/),
+    docs/WATCHDOG.md, config/cms.conf.sample, config/cms.ranking.conf.sample
+
+CMS-BEU                                2026-09-29                            CMS-BEU(1)
