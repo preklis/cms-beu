@@ -1,0 +1,34 @@
+#!/bin/sh
+# Convenience wrapper around the cms-watchdog systemd service.
+# See man.txt ("cms-watchdog-util").
+
+UNIT=${CMS_WATCHDOG_UNIT:-cms-watchdog}
+LOG_DIR=${CMS_WATCHDOG_LOG_DIR:-/var/local/log/cms}
+HERE=$(dirname "$(readlink -f "$0")")
+
+case "$1" in
+    status)
+        systemctl --no-pager status "$UNIT" | head -n 5
+        echo
+        python3 "$HERE/cms-watchdog.py" status
+        ;;
+    health)
+        exec python3 "$HERE/cms-watchdog.py" status
+        ;;
+    logs)
+        tail -n "${2:-50}" "$LOG_DIR/watchdog.log"
+        ;;
+    follow)
+        exec tail -F "$LOG_DIR/watchdog.log"
+        ;;
+    service-logs)
+        tail -n "${2:-50}" "$LOG_DIR/ranking.log" "$LOG_DIR/proxy.log"
+        ;;
+    start|stop|restart|enable|disable)
+        exec sudo systemctl "$1" "$UNIT"
+        ;;
+    *)
+        echo "Usage: $(basename "$0") {status|health|logs [N]|follow|service-logs [N]|start|stop|restart|enable|disable}" >&2
+        exit 2
+        ;;
+esac
