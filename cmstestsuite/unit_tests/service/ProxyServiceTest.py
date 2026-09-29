@@ -25,15 +25,17 @@
 import gevent.monkey
 gevent.monkey.patch_all()  # noqa
 
+import json
 import unittest
-from unittest.mock import patch, PropertyMock
+from unittest.mock import Mock, patch, PropertyMock
 
 import gevent
+import requests
 
 # Needs to be first to allow for monkey patching the DB connection string.
 from cmstestsuite.unit_tests.databasemixin import DatabaseMixin
 
-from cms.service.ProxyService import ProxyService
+from cms.service.ProxyService import ProxyExecutor, ProxyService
 from cmscommon.constants import SCORE_MODE_MAX
 
 
@@ -108,6 +110,92 @@ class TestProxyService(DatabaseMixin, unittest.TestCase):
         self.assertTrue(any(urls[i].endswith("tasks/") for i in [1, 2, 3]))
         self.assertTrue(urls[4].endswith("submissions/"))
         self.assertTrue(urls[5].endswith("subchanges/"))
+
+    def sent(self, resource):
+        """Return the entities PUT to the given resource, merged."""
+        data = dict()
+        for args, _ in self.requests_put.call_args_list:
+            if args[0].endswith(resource + "/"):
+                data.update(json.loads(args[1]))
+        return data
+
+    def test_late_participation(self):
+        """Scores of users added after startup reach the rankings."""
+        service = ProxyService(0, self.contest.id)
+        gevent.sleep(0.1)
+
+        user = self.add_user()
+        participation = self.add_participation(user=user,
+                                               contest=self.contest)
+        submission = self.add_submission(task=self.task,
+                                         participation=participation)
+        result = self.add_submission_result(submission=submission,
+                                            dataset=self.dataset)
+        result.compilation_outcome = "ok"
+        result.evaluation_outcome = "ok"
+        result.score = 100
+        result.score_details = dict()
+        result.public_score = 50
+        result.public_score_details = dict()
+        result.ranking_score_details = ["100"]
+        self.session.commit()
+
+        service.submission_scored(submission.id)
+        gevent.sleep(0.1)
+
+        self.assertIn(user.username, self.sent("users"))
+        self.assertIn(str(submission.id), self.sent("submissions"))
+
+    def test_hidden_participation(self):
+        """Scores of hidden users are never sent."""
+        service = ProxyService(0, self.contest.id)
+        gevent.sleep(0.1)
+
+        user = self.add_user()
+        participation = self.add_participation(user=user,
+                                               contest=self.contest,
+                                               hidden=True)
+        submission = self.add_submission(task=self.task,
+                                         participation=participation)
+        self.session.commit()
+
+        self.assertEqual(service.operations_for_score(submission), [])
+        self.assertNotIn(user.username, self.sent("users"))
+
+    @patch.object(ProxyExecutor, "FAILURE_WAIT", 0.01)
+    def test_retry_when_ranking_down(self):
+        """Data is sent again once an unreachable ranking comes back."""
+        ok = self.requests_put.return_value
+        self.requests_put.return_value = None
+        self.requests_put.side_effect = \
+            [requests.exceptions.ConnectionError("down")] * 3 \
+            + [ok] * 20
+
+        ProxyService(0, self.contest.id)
+        gevent.sleep(0.3)
+
+        self.assertIn(self.user.username, self.sent("users"))
+        self.assertEqual(len(self.sent("submissions")), 2)
+        self.assertEqual(len(self.sent("subchanges")), 3)
+
+    @patch.object(ProxyExecutor, "FAILURE_WAIT", 0.01)
+    def test_rejected_data_dropped(self):
+        """Data rejected by the ranking is not retried forever."""
+        ok = self.requests_put.return_value
+        rejected = Mock(status_code=400)
+        self.requests_put.return_value = None
+        self.requests_put.side_effect = \
+            lambda url, *args, **kwargs: \
+            rejected if url.endswith("teams/") else ok
+
+        ProxyService(0, self.contest.id)
+        gevent.sleep(0.3)
+
+        urls = [args[0] for args, _ in self.requests_put.call_args_list]
+        self.assertEqual(sum(url.endswith("teams/") for url in urls), 1)
+        # The other entity types are still delivered.
+        self.assertIn(self.user.username, self.sent("users"))
+        self.assertEqual(len(self.sent("submissions")), 2)
 
 
 if __name__ == "__main__":

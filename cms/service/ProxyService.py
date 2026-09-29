@@ -50,7 +50,22 @@ logger = logging.getLogger(__name__)
 
 
 class CannotSendError(Exception):
-    pass
+    """Raised when data could not be delivered to a ranking.
+
+    retriable (bool): whether sending the same data again later may
+        succeed (network errors, server errors) or not (the ranking
+        rejected the data, e.g. because it is malformed).
+
+    """
+    def __init__(self, msg, retriable=True):
+        super().__init__(msg)
+        self.retriable = retriable
+
+
+# Seconds to wait for a ranking to answer before considering the
+# request failed (a hung ranking would otherwise block the executor
+# forever, since requests has no default timeout).
+REQUEST_TIMEOUT = (10, 300)
 
 
 def encode_id(entity_id):
@@ -89,7 +104,8 @@ def safe_put_data(ranking, resource, data, operation):
         res = requests.put(url, json.dumps(data),
                            auth=(auth.username, auth.password),
                            headers={'content-type': 'application/json'},
-                           verify=config.https_certfile)
+                           verify=config.https_certfile,
+                           timeout=REQUEST_TIMEOUT)
     except requests.exceptions.RequestException as error:
         msg = "%s while %s: %s." % (type(error).__name__, operation, error)
         logger.warning(msg)
@@ -97,7 +113,11 @@ def safe_put_data(ranking, resource, data, operation):
     if 400 <= res.status_code < 600:
         msg = "Status %s while %s." % (res.status_code, operation)
         logger.warning(msg)
-        raise CannotSendError(msg)
+        # 4xx (except 408 and 429) means the ranking will never accept
+        # this data as it is; 5xx and those two are transient.
+        raise CannotSendError(
+            msg, retriable=res.status_code >= 500
+            or res.status_code in (408, 429))
 
 
 def safe_delete_data(ranking, resource, operation):
@@ -115,7 +135,8 @@ def safe_delete_data(ranking, resource, operation):
         auth = urlsplit(url)
         res = requests.delete(url,
                               auth=(auth.username, auth.password),
-                              verify=config.https_certfile)
+                              verify=config.https_certfile,
+                              timeout=REQUEST_TIMEOUT)
     except requests.exceptions.RequestException as error:
         msg = "%s while %s: %s." % (type(error).__name__, operation, error)
         logger.warning(msg)
@@ -207,6 +228,21 @@ class ProxyExecutor(Executor):
         self._ranking = ranking
         self._visible_ranking = safe_url(ranking)
 
+    def _requeue(self, data):
+        """Put back in the queue the data that has not been sent yet.
+
+        data ([dict]): for each entity type, the entities to send.
+
+        """
+        count = 0
+        for type_, entities in enumerate(data):
+            if len(entities) > 0:
+                self.enqueue(ProxyOperation(type_, dict(entities)))
+                count += len(entities)
+        if count > 0:
+            logger.info("Will retry sending %d entities to ranking %s.",
+                        count, self._visible_ranking)
+
     def execute(self, entries):
         """Consume (i.e. send) the data put in the queue, forever.
 
@@ -243,13 +279,27 @@ class ProxyExecutor(Executor):
                                     name, self._visible_ranking)
 
                     logger.debug(operation.capitalize())
-                    safe_put_data(
-                        self._ranking, "%s/" % name, data[i], operation)
+                    try:
+                        safe_put_data(
+                            self._ranking, "%s/" % name, data[i], operation)
+                    except CannotSendError as error:
+                        if error.retriable:
+                            raise
+                        # Retrying would fail again (and, since batches
+                        # merge all pending data, block everything else
+                        # forever): drop this entity type only.
+                        logger.error("Ranking %s rejected %d %s; dropping "
+                                     "them.", self._visible_ranking,
+                                     len(data[i]), name)
                     data[i].clear()
 
         except CannotSendError:
             # A log message has already been produced.
             gevent.sleep(self.FAILURE_WAIT)
+            # The data that was not sent must not be lost: the service
+            # already considers it delivered and would otherwise only
+            # send it again after a restart.
+            self._requeue(data)
         except:
             # Whoa! That's unexpected!
             logger.error("Unexpected error.", exc_info=True)
@@ -332,6 +382,61 @@ class ProxyService(TriggeredService):
             return "%s__%s" % (self._contest_key(contest), task_key)
         return task_key
 
+    def _participation_data(self, contest, participation):
+        """Return the data to send to rankings about a participation.
+
+        return ((str, dict, dict)): the user key, the user entity and
+            the team entity (empty if the user has no team), in the
+            format expected by rankings.
+
+        """
+        user = participation.user
+        team = participation.team
+        user_key = self._user_key(contest, user)
+        user_data = {user_key: {
+            "f_name": user.first_name,
+            "l_name": user.last_name,
+            "contest": self._contest_key(contest),
+            "team": self._team_key(contest, team)
+            if team is not None else None,
+        }}
+        team_data = {}
+        if team is not None:
+            team_data[self._team_key(contest, team)] = {"name": team.name}
+        return user_key, user_data, team_data
+
+    def _ensure_user_sent(self, submission):
+        """Make sure the rankings know the author of the submission.
+
+        Participations created after the initialization (e.g., users
+        added while the contest is running) are unknown to rankings,
+        which would reject their submissions: send them now, rather
+        than dropping their scores until the next restart.
+
+        return (str|None): the user key, or None if the participation
+            is hidden and nothing must be sent.
+
+        """
+        contest = submission.task.contest
+        participation = submission.participation
+        user_key = self._user_key(contest, participation.user)
+        if user_key in self.visible_user_keys:
+            return user_key
+        if participation.hidden:
+            logger.debug("Skipping submission %d of hidden user %s.",
+                         submission.id, user_key)
+            return None
+
+        logger.info("Sending user %s (added after initialization) to "
+                    "rankings.", user_key)
+        user_key, user_data, team_data = \
+            self._participation_data(contest, participation)
+        if team_data:
+            self.enqueue(ProxyOperation(ProxyExecutor.TEAM_TYPE, team_data))
+        self.enqueue(ProxyOperation(ProxyExecutor.USER_TYPE, user_data))
+        self.visible_user_keys.add(user_key)
+        return user_key
+
     def _missing_operations(self):
         """Return a generator of data to be sent to the rankings..
 
@@ -380,7 +485,16 @@ class ProxyService(TriggeredService):
                 for resource in ProxyExecutor.RESOURCE_PATHS:
                     operation = "clearing %s on ranking %s" % (
                         resource, safe_url(ranking))
-                    safe_delete_data(ranking, "%s/" % resource, operation)
+                    try:
+                        safe_delete_data(ranking, "%s/" % resource,
+                                         operation)
+                    except CannotSendError:
+                        # Do not crash the service when the ranking is
+                        # down: the data sent later overwrites the old
+                        # one anyway, only stale entities may remain.
+                        logger.warning("Could not clear %s on ranking %s; "
+                                       "continuing.", resource,
+                                       safe_url(ranking))
 
         with SessionGen() as session:
             if self.contest_id is None:
@@ -412,20 +526,11 @@ class ProxyService(TriggeredService):
                     if participation.hidden:
                         continue
 
-                    user = participation.user
-                    team = participation.team
-                    users[self._user_key(contest, user)] = {
-                        "f_name": user.first_name,
-                        "l_name": user.last_name,
-                        "contest": contest_key,
-                        "team": self._team_key(contest, team)
-                        if team is not None else None,
-                    }
-                    visible_user_keys.add(self._user_key(contest, user))
-                    if team is not None:
-                        teams[self._team_key(contest, team)] = {
-                            "name": team.name
-                        }
+                    user_key, user_data, team_data = \
+                        self._participation_data(contest, participation)
+                    users.update(user_data)
+                    teams.update(team_data)
+                    visible_user_keys.add(user_key)
 
                 for task in contest.tasks:
                     score_type = task.active_dataset.score_type_object
@@ -459,10 +564,8 @@ class ProxyService(TriggeredService):
         # Data to send to remote rankings.
         submission_id = "%d" % submission.id
         contest = submission.task.contest
-        user_key = self._user_key(contest, submission.participation.user)
-        if user_key not in self.visible_user_keys:
-            logger.debug("Skipping submission %d for non-visible user %s.",
-                         submission.id, user_key)
+        user_key = self._ensure_user_sent(submission)
+        if user_key is None:
             return []
 
         submission_data = {
@@ -500,10 +603,8 @@ class ProxyService(TriggeredService):
         # Data to send to remote rankings.
         submission_id = "%d" % submission.id
         contest = submission.task.contest
-        user_key = self._user_key(contest, submission.participation.user)
-        if user_key not in self.visible_user_keys:
-            logger.debug("Skipping token for submission %d with non-visible user %s.",
-                         submission.id, user_key)
+        user_key = self._ensure_user_sent(submission)
+        if user_key is None:
             return []
 
         submission_data = {
