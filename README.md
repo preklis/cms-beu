@@ -13,6 +13,17 @@ Custom changes in this fork
 - Admin web server CSV user upload flow with generated usernames and secure random passwords.
 - Ranking web server updates for multi-contest mode with a contest selector dropdown.
 - Deployment-specific fixes for cache busting and service binding in this environment.
+- Code editor v2: CodeMirror served locally (works offline), all contest
+  languages, multi-file tasks, drafts saved in the browser, and "Run" on a
+  custom input (through user tests) with inline output and compiler errors.
+  Submissions are sent via XHR with inline error reporting.
+- ProxyService stability: data is re-queued instead of lost while the ranking
+  is down, request timeouts, no crash at startup if the ranking is down, and
+  users added mid-contest reach the ranking.
+- Watchdog rewrite (`scripts/cms-watchdog.py`): hung-process detection,
+  exponential restart backoff, config-driven health checks, and a `status`
+  command; systemd unit sample and `cms-watchdog-util` included.
+- `man.txt`: a manual for every CMS command, the watchdog, and the editor.
 
 [![Build Status](https://github.com/cms-dev/cms/actions/workflows/main.yml/badge.svg)](https://github.com/cms-dev/cms/actions)
 [![Codecov](https://codecov.io/gh/cms-dev/cms/branch/master/graph/badge.svg)](https://codecov.io/gh/cms-dev/cms)

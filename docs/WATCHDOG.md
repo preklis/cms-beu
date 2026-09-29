@@ -1,212 +1,114 @@
 # CMS Ranking/Proxy Watchdog
 
-Automated monitoring and recovery system for the CMS ranking and proxy services.
+Automatic monitoring and recovery for `cmsRankingWebServer` and
+`cmsProxyService` (`scripts/cms-watchdog.py`). The full option reference
+is in `man.txt` at the repository root.
 
-## What It Does
+## What it does
 
-The watchdog daemon (`cms-watchdog.py`) automatically:
+- **Restarts crashed services.** If a service's process exits, it is
+  started again.
+- **Restarts hung services.** If a service is alive but fails
+  `--max-failed-checks` consecutive health checks (default 4), the
+  watchdog sends SIGTERM to its whole process group, then SIGKILL after
+  `--stop-timeout` seconds, and starts it again.
+- **Backs off on crash loops.** Restarts are spaced exponentially, from
+  `--backoff-min` (5s) up to `--backoff-max` (300s). The backoff resets
+  once the service has been healthy for `--stable-after` seconds (600s).
+- **Waits for ResourceService.** Nothing is started while
+  ResourceService is unreachable. The watchdog never touches
+  ResourceService itself.
+- **Leaves other instances alone.** If an instance that the watchdog did
+  not start is already running, the watchdog does not start a second
+  copy. If that instance is unhealthy, the watchdog logs a warning and
+  does not kill it.
+- **Backfills the ranking.** When ProxyService starts, it replays every
+  score and token, so the ranking catches up after downtime.
 
-1. **Monitors service health** - Checks every 30 seconds if cmsRankingWebServer and cmsProxyService are running
-2. **Auto-restarts on crash** - If either service dies, the watchdog restarts it immediately
-3. **Respects ResourceService** - Never starts ranking/proxy until ResourceService is healthy (never interferes)
-4. **Backfills submissions** - When ProxyService starts, it automatically replays missed operations to restore historical submissions
-5. **Logs everything** - All actions logged to `/tmp/cms-watchdog.log` and systemd journal
-6. **Runs as a daemon** - Installed as systemd service that auto-starts on boot
+## Health checks
 
-## Quick Commands
+| Service         | Check                                                                     |
+|-----------------|---------------------------------------------------------------------------|
+| ResourceService | TCP connect to its RPC address from `cms.conf` (default `localhost:28000`), or a running `cmsResourceService` process |
+| Ranking         | HTTP GET `<ranking>/contests/` using the first `rankings` URL in `cms.conf` (credentials stripped). Any response below 500 counts as healthy |
+| Proxy           | TCP connect to the ProxyService RPC address from `cms.conf` (default `localhost:28600`) |
+
+A newly started service has `--grace` seconds (30 by default) to become
+healthy before failed checks count against it.
+
+## Quick commands
 
 ```bash
-# Check status
-cms-watchdog-util status
-
-# View recent activity
-cms-watchdog-util logs
-
-# Follow live logs
-cms-watchdog-util follow
-
-# Restart watchdog if needed
-cms-watchdog-util restart
-
-# Enable/disable auto-start on boot
-cms-watchdog-util enable
-cms-watchdog-util disable
+scripts/cms-watchdog.py status     # one-shot health report (exit code 0 = all up)
+cms-watchdog-util status           # systemd status + health report
+cms-watchdog-util logs [N]         # last N lines of the watchdog log
+cms-watchdog-util follow           # follow the watchdog log
+cms-watchdog-util service-logs     # tail ranking.log and proxy.log
+cms-watchdog-util restart          # restart the watchdog (systemd)
 ```
 
-## How It Works
+## Installation (systemd)
 
-### Startup Sequence
-1. Watchdog starts (systemd service)
-2. Waits for ResourceService to be healthy on port 8001
-3. Once ResourceService ready, starts cmsRankingWebServer
-4. Starts cmsProxyService with multicontest mode (`-c ALL 0`)
-   - ProxyService detects missed operations from before it was running
-   - Automatically replays them to backfill submissions
-5. Enters monitoring loop, checking every 30 seconds
+```bash
+sudo cp scripts/cms-watchdog-util /usr/local/bin/
+sudo cp config/cms-watchdog.service.sample /etc/systemd/system/cms-watchdog.service
+sudoedit /etc/systemd/system/cms-watchdog.service   # set User=, CMS_HOME, paths
+sudo systemctl daemon-reload
+sudo systemctl enable --now cms-watchdog
+```
 
-### Recovery Process
-When a service crash is detected:
-1. Waits 5 seconds (cooldown period to avoid restart loops)
-2. Checks that ResourceService is still healthy
-3. Restarts ranking service first, then proxy service
-4. Proxy backfills any missed operations that occurred during downtime
-5. Resumes monitoring
-
-### Health Checks
-- **Ranking**: HTTP GET to `http://127.0.0.1:8890/contests/` (must return HTTP 200)
-- **Proxy**: Checks if process is running in background
-- **ResourceService**: HTTP GET to `http://127.0.0.1:8001/ping` (must return HTTP 200)
+If you use `cms-watchdog-util` from `/usr/local/bin`, symlink it rather
+than copying it, so it can find `cms-watchdog.py`:
+`sudo ln -s $CMS_HOME/scripts/cms-watchdog-util /usr/local/bin/`.
 
 ## Files
 
-- **Watchdog script**: `/home/arazoglu/cms/scripts/cms-watchdog.py` (Python)
-- **Systemd service**: `/etc/systemd/system/cms-watchdog.service`
-- **Watchdog logs**: `/tmp/cms-watchdog.log` (main), systemd journal (via `journalctl -u cms-watchdog`)
-- **Service logs**: `/tmp/cms-ranking.log`, `/tmp/cms-proxy.log`
-- **Utility**: `/usr/local/bin/cms-watchdog-util` (bash)
+| What                     | Where (defaults)                                        |
+|--------------------------|---------------------------------------------------------|
+| Watchdog                 | `scripts/cms-watchdog.py`                               |
+| Helper                   | `scripts/cms-watchdog-util`                             |
+| systemd unit (sample)    | `config/cms-watchdog.service.sample`                    |
+| Watchdog log             | `/var/local/log/cms/watchdog.log` (`--log-dir`)         |
+| Ranking / proxy output   | `/var/local/log/cms/ranking.log`, `proxy.log`           |
 
-## Logs
+The watchdog runs `scripts/cmsRankingWebServer` and
+`scripts/cmsProxyService` from `--cms-home` when they exist there.
+Otherwise it runs the installed commands from `PATH`. By default,
+ProxyService runs in multi-contest mode (`-c ALL 0`). Use `-c <id>` to
+serve a single contest.
 
-Check logs to understand what's happening:
+## Manual control
 
-```bash
-# Last 20 lines of watchdog activity
-tail -n 20 /tmp/cms-watchdog.log
-
-# Full history
-tail -n 100 /tmp/cms-watchdog.log
-
-# Follow in real-time
-cms-watchdog-util follow
-
-# Via systemd (includes system context)
-journalctl -u cms-watchdog.service -f
-```
-
-Example log output:
-```
-2026-04-12 08:07:43 [INFO] CMS Watchdog started
-2026-04-12 08:07:43 [INFO] Monitoring: cmsRankingWebServer + cmsProxyService (-c ALL 0)
-2026-04-12 08:07:50 [INFO] ResourceService is now available
-2026-04-12 08:07:51 [INFO] Starting services...
-2026-04-12 08:07:52 [INFO] Started ranking service (PID 4521)
-2026-04-12 08:07:54 [INFO] Started proxy service (PID 4541)
-2026-04-12 08:07:54 [INFO] Proxy initialized: missed-operations replay will backfill submissions
-2026-04-12 08:07:54 [INFO] ✓ Both services restarted successfully
-2026-04-12 08:08:24 [INFO] Health check: ranking:✓ | proxy:✓
-```
-
-## Manual Control
-
-You can still manually stop/start services (watchdog won't interfere during 5-second cooldown):
+When systemd stops the watchdog, the watchdog also stops the services it
+started. If you want them to keep running, pass `--keep-services`.
 
 ```bash
-# Stop watchdog (doesn't stop services, they keep running)
-sudo systemctl stop cms-watchdog.service
-
-# Stop services (watchdog will restart them if it's running)
-pkill -f cmsRankingWebServer
-pkill -f cmsProxyService
-
-# Stop everything including watchdog
-sudo systemctl stop cms-watchdog.service
-pkill -f cmsRankingWebServer
-pkill -f cmsProxyService
+sudo systemctl stop cms-watchdog      # stops watchdog + its services
+cmsRankingWebServer &                 # run things by hand...
+cmsProxyService -c ALL 0 &
+sudo systemctl start cms-watchdog     # ...the watchdog adopts running healthy instances
 ```
 
-## ResourceService Safety
+## Ranking downtime and data loss
 
-The watchdog **never** touches ResourceService:
-- Only checks if it's healthy before restarting ranking/proxy
-- If ResourceService is down, watchdog waits up to 30 seconds for it to recover
-- If ResourceService isn't healthy, ranking/proxy restart is delayed
-- This ensures you can work with ResourceService without the watchdog interfering
-
-## Backfill Behavior
-
-When ProxyService starts (including auto-restarts):
-1. It connects to the database
-2. Detects any operations that happened while it was offline
-3. Automatically replays them to the ranking server
-4. Logs: "Found X missed operation(s)"
-
-This ensures historical submissions are always restored, even if:
-- Ranking was down for maintenance
-- Services crashed
-- System was rebooted
+ProxyService no longer loses data while the ranking is unreachable.
+Data that fails to send because of a network error, a 5xx response or a
+timeout goes back into the queue and is retried every 60 seconds. Data
+that the ranking rejects with a 4xx response is logged and dropped. The
+ranking will never accept it, and keeping it would block everything
+else. Users added while the contest is running are sent to the ranking
+the first time one of their submissions is scored.
 
 ## Troubleshooting
 
-### Watchdog not running
-```bash
-sudo systemctl status cms-watchdog.service
-```
-
-### Services crash repeatedly
-Check logs for root cause:
-```bash
-cms-watchdog-util logs
-```
-
-### Manually verify services are running
-```bash
-ps aux | grep -E 'cmsRanking|cmsProxy' | grep -v grep
-```
-
-### Check service responsiveness
-```bash
-curl http://127.0.0.1:8890/contests/
-curl http://127.0.0.1:8001/ping
-```
-
-### Disable watchdog temporarily
-```bash
-sudo systemctl stop cms-watchdog.service
-```
-
-Then manually start services:
-```bash
-cd /home/arazoglu/cms && cmsRankingWebServer >/tmp/cms-ranking.log 2>&1 &
-cd /home/arazoglu/cms && scripts/cmsProxyService -c ALL 0 >/tmp/cms-proxy.log 2>&1 &
-```
-
-### Re-enable watchdog
-```bash
-sudo systemctl start cms-watchdog.service
-```
-
-## Auto-Start on Boot
-
-The watchdog is automatically configured to start on system boot:
-
-```bash
-# Verify it's enabled
-sudo systemctl is-enabled cms-watchdog.service
-# Output: enabled
-
-# If you want to disable auto-start:
-cms-watchdog-util disable
-
-# To re-enable:
-cms-watchdog-util enable
-```
-
-When the system reboots, the watchdog will automatically:
-1. Wait for ResourceService to be ready
-2. Start cmsRankingWebServer
-3. Start cmsProxyService with backfill
-4. Begin monitoring
-
-No manual intervention needed.
-
-## Summary
-
-With this watchdog in place:
-- ✅ Services automatically restart if they crash
-- ✅ Historical submissions are backfilled on startup
-- ✅ Monitoring happens continuously without user intervention
-- ✅ ResourceService is never interfered with
-- ✅ All activity is logged for troubleshooting
-- ✅ System survives reboots (auto-starts on boot)
-
-You can focus on running the contest while the watchdog handles service reliability.
+- **A service keeps restarting.** Run `cms-watchdog-util service-logs`
+  and look at the service's own output for the root cause.
+- **"ResourceService is not reachable".** Start it with
+  `cmsResourceService -a <contest_id>`, or fix its address in
+  `cms.conf`.
+- **"running outside the watchdog but not responding".** An instance
+  that the watchdog did not start is hung. Kill it by hand, and the
+  watchdog will start a fresh one.
+- **Ranking check fails but the ranking works.** Check that
+  `--ranking-url`, or the first `rankings` URL in `cms.conf`, points at
+  the ranking server's real HTTP address.

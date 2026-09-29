@@ -1,0 +1,30 @@
+# systemd unit for the CMS ranking/proxy watchdog (scripts/cms-watchdog.py).
+#
+# Install:
+#   sudo cp config/cms-watchdog.service.sample /etc/systemd/system/cms-watchdog.service
+#   (edit User=, CMS_HOME and the paths below to match your installation)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cms-watchdog
+#
+# See man.txt ("cms-watchdog.py") and docs/WATCHDOG.md.
+
+[Unit]
+Description=CMS ranking/proxy watchdog
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cmsuser
+Environment=CMS_HOME=/home/cmsuser/cms
+Environment=CMS_WATCHDOG_CONTEST=ALL
+Environment=CMS_WATCHDOG_LOG_DIR=/var/local/log/cms
+ExecStart=/usr/bin/env python3 /home/cmsuser/cms/scripts/cms-watchdog.py run
+# The watchdog stops its services on SIGTERM; give it time to do so.
+KillMode=mixed
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

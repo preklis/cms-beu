@@ -23,6 +23,23 @@
    can_play_token = true). #}
 {% set can_play_token_now = can_play_token and tokens_info[2] is none %}
 
+{% block head_extra %}
+{% if editor_config is not none %}
+        <link rel="stylesheet" href="{{ url("static", "codemirror", "codemirror.css") }}">
+        <link rel="stylesheet" href="{{ url("static", "codemirror", "theme", "eclipse.css") }}">
+        <link rel="stylesheet" href="{{ url("static", "codemirror", "theme", "monokai.css") }}">
+        <script src="{{ url("static", "codemirror", "codemirror.js") }}"></script>
+        <script src="{{ url("static", "codemirror", "addon", "simple.js") }}"></script>
+{% for mode in ["clike", "python", "pascal", "rust", "haskell", "xml", "javascript", "css", "htmlmixed", "php"] %}
+        <script src="{{ url("static", "codemirror", "mode", mode ~ ".js") }}"></script>
+{% endfor %}
+{% for addon in ["matchbrackets", "closebrackets", "active-line", "searchcursor", "match-highlighter", "comment"] %}
+        <script src="{{ url("static", "codemirror", "addon", addon ~ ".js") }}"></script>
+{% endfor %}
+        <script src="{{ url("static", "cws_editor.js", v="20260929a") }}"></script>
+{% endif %}
+{% endblock head_extra %}
+
 {% block additional_js %}
 
 $(document).on("click", ".submission_list tbody tr td.status .details", function (event) {
@@ -160,135 +177,6 @@ $(document).ready(function () {
         schedule_update_scores($(this).attr("data-submission"));
     });
 
-    // Initialize CodeMirror editor
-    var codeEditor = null;
-    var languageMap = {
-        'C++11 / g++': 'text/x-c++src',
-        'C++14 / g++': 'text/x-c++src',
-        'C++17 / g++': 'text/x-c++src',
-        'C++20 / g++': 'text/x-c++src',
-        'C11 / gcc': 'text/x-csrc',
-        'Python 3 / CPython': 'text/x-python',
-        'Python 3 / PyPy': 'text/x-python'
-    };
-
-    function initCodeEditor() {
-        if (!codeEditor) {
-            codeEditor = CodeMirror(document.getElementById('code-editor'), {
-                lineNumbers: true,
-                mode: 'text/x-c++src',
-                theme: 'monokai',
-                indentUnit: 4,
-                indentWithTabs: false,
-                lineWrapping: true,
-                matchBrackets: true,
-                autoCloseBrackets: true,
-                styleActiveLine: true,
-                highlightSelectionMatches: {showToken: /\w/, annotateScrollbar: true},
-                height: '400px'
-            });
-        }
-    }
-
-    function updateEditorLanguage(lang) {
-        if (codeEditor) {
-            var mode = languageMap[lang] || 'text/plain';
-            codeEditor.setOption('mode', mode);
-        }
-    }
-
-    // Toggle between upload and editor modes
-    $('.mode-toggle-btn').on('click', function(e) {
-        e.preventDefault();
-        var mode = $(this).data('mode');
-        
-        $('.mode-toggle-btn').removeClass('active');
-        $(this).addClass('active');
-        
-        $('.submission-mode-container').hide();
-        
-        if (mode === 'editor') {
-            $('#editor-mode').show();
-            initCodeEditor();
-        } else if (mode === 'upload') {
-            $('#upload-mode').show();
-        }
-    });
-
-    // Handle language change in code editor
-    $('#editor-language').on('change', function() {
-        updateEditorLanguage($(this).val());
-    });
-
-    // Handle form submission for code editor
-    $('#editor-form').on('submit', function(e) {
-        e.preventDefault();
-        
-        if (!codeEditor) {
-            alert('Code editor not initialized');
-            return;
-        }
-
-        var codeContent = codeEditor.getValue();
-        if (!codeContent.trim()) {
-            alert('Please write some code');
-            return;
-        }
-
-        var language = $('#editor-language').val();
-        var languageExtensions = {
-            'C++11 / g++': '.cpp',
-            'C++14 / g++': '.cpp',
-            'C++17 / g++': '.cpp',
-            'C++20 / g++': '.cpp',
-            'C11 / gcc': '.c',
-            'Python 3 / CPython': '.py',
-            'Python 3 / PyPy': '.py'
-        };
-        
-        var extension = languageExtensions[language] || '.txt';
-        
-        // Create a hidden form to submit the code
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.enctype = 'multipart/form-data';
-        form.action = $(this).attr('action');
-        
-        // Copy XSRF token from original form
-        var xsrfInput = $(this).find('input[name*="xsrf"]')[0];
-        if (xsrfInput) {
-            form.appendChild(xsrfInput.cloneNode(true));
-        }
-        
-        // Create a file-like object with the code content
-        // Since we can't create actual File objects, we'll use a blob
-        var blob = new Blob([codeContent], { type: 'text/plain' });
-        var file = new File([blob], 'submission' + extension, { type: 'text/plain' });
-        
-        // Add the file and language to FormData
-        var formData = new FormData(form);
-        
-        // For single file submission
-        var submissionFormat = "{{ task.submission_format|first if task.submission_format else 'task1.%l' }}";
-        formData.set(submissionFormat, file);
-        formData.set('language', language);
-        
-        // Submit the form
-        $.ajax({
-            type: 'POST',
-            url: form.action,
-            data: formData,
-            processData: false,
-            contentType: false,
-            success: function(data) {
-                // Refresh the page on success
-                location.reload();
-            },
-            error: function(xhr, status, error) {
-                alert('Submission failed: ' + error);
-            }
-        });
-    });
 });
 
 {% endblock additional_js %}
@@ -370,17 +258,17 @@ $(document).ready(function () {
     </div>
 {% endif %}
 
-<div id="submit_solution" class="row">
-    <!-- Toggle between file upload and code editor -->
-    <div class="span9">
-        <div class="submission-mode-toggle">
-            <button type="button" class="mode-toggle-btn active" data-mode="upload">📤 Upload File</button>
-            <button type="button" class="mode-toggle-btn" data-mode="editor">✏️ Write Code</button>
-        </div>
+<div id="submit_solution">
+{% if editor_config is not none %}
+    <div class="submission-mode-toggle" role="tablist">
+        <button type="button" class="mode-toggle-btn active" data-mode="upload" role="tab" aria-selected="true">{% trans %}Upload files{% endtrans %}</button>
+        <button type="button" class="mode-toggle-btn" data-mode="editor" role="tab" aria-selected="false">{% trans %}Write code{% endtrans %}</button>
     </div>
+{% endif %}
 
+<div class="row">
     <!-- File Upload Mode -->
-    <div class="span5 submission-mode-container" id="upload-mode">
+    <div class="span5 submission-mode-container" id="upload-mode" data-mode="upload">
         <form class="form-horizontal" enctype="multipart/form-data" action="{{ contest_url("tasks", task.name, "submit") }}" method="POST">
             {{ xsrf_form_html|safe }}
             <fieldset>
@@ -415,44 +303,8 @@ $(document).ready(function () {
             </fieldset>
         </form>
     </div>
-
-    <!-- Code Editor Mode -->
-    <div class="span9 submission-mode-container" id="editor-mode" style="display: none;">
-        <form class="form-horizontal" enctype="multipart/form-data" action="{{ contest_url("tasks", task.name, "submit") }}" method="POST" id="editor-form">
-            {{ xsrf_form_html|safe }}
-            <fieldset>
-                {% if task.submission_format|any("endswith", ".%l") %}
-                <div class="control-group">
-                    <label class="control-label" for="editor-language">{% trans %}Language{% endtrans %}</label>
-                    <div class="controls">
-                        <select id="editor-language" name="language">
-{% for lang in contest.languages %}
-                            <option value="{{ lang }}">{{ lang }}</option>
-{% endfor %}
-                        </select>
-                    </div>
-                </div>
-                {% endif %}
-                
-                <div class="control-group">
-                    <label class="control-label" for="code-editor">{% trans %}Code{% endtrans %}</label>
-                    <div class="controls">
-                        <div id="code-editor" class="code-editor"></div>
-                        <textarea id="code-content" name="code_content" style="display: none;"></textarea>
-                    </div>
-                </div>
-
-                <div class="control-group">
-                    <div class="controls">
-                        <button type="submit" class="btn btn-success">{% trans %}Submit{% endtrans %}</button>
-                        <button type="reset" class="btn">{% trans %}Reset{% endtrans %}</button>
-                    </div>
-                </div>
-            </fieldset>
-        </form>
-    </div>
 {% if task.submission_format|length > 1 and not task.submission_format|any("endswith", ".%l") %}
-    <div class="span4 submission-mode-container" id="upload-zip-mode">
+    <div class="span4 submission-mode-container" id="upload-zip-mode" data-mode="upload">
         <form class="form-horizontal" enctype="multipart/form-data" action="{{ contest_url("tasks", task.name, "submit") }}" method="POST">
             {{ xsrf_form_html|safe }}
             <fieldset>
@@ -471,6 +323,134 @@ $(document).ready(function () {
             </fieldset>
         </form>
     </div>
+{% endif %}
+</div>
+
+{% if editor_config is not none %}
+{% set can_run = editor_config.test_url is not none %}
+<!-- Code Editor Mode -->
+<div class="submission-mode-container" id="editor-mode" data-mode="editor" style="display: none;">
+    <form id="editor-form" action="{{ editor_config.submit_url }}" method="POST">
+        {{ xsrf_form_html|safe }}
+        <div id="editor-workspace" class="editor-workspace">
+            <div class="editor-toolbar">
+                <div class="editor-toolbar-group editor-files">
+{% if editor_config.files|length > 1 %}
+{% for file in editor_config.files %}
+                    <button type="button" class="editor-file-tab{% if loop.first %} active{% endif %}" data-file="{{ file }}">{{ file }}</button>
+{% endfor %}
+{% else %}
+                    <span id="editor-filename" class="editor-filename"></span>
+{% endif %}
+                </div>
+                <div class="editor-toolbar-group">
+                    <label for="editor-language" class="editor-label">{% trans %}Language{% endtrans %}</label>
+                    <select id="editor-language" class="editor-select">
+{% for lang in editor_config.languages %}
+                        <option value="{{ lang.name }}">{{ lang.name }}</option>
+{% endfor %}
+                    </select>
+                </div>
+                <div class="editor-toolbar-group editor-tools">
+                    <button type="button" class="editor-tool" id="editor-load" title="{% trans %}Load the code from a file on your computer{% endtrans %}">{% trans %}Open{% endtrans %}</button>
+                    <button type="button" class="editor-tool" id="editor-download" title="{% trans %}Save the code to a file on your computer{% endtrans %}">{% trans %}Save as{% endtrans %}</button>
+                    <button type="button" class="editor-tool" id="editor-clear" title="{% trans %}Clear the editor{% endtrans %}">{% trans %}Clear{% endtrans %}</button>
+                    <span class="editor-tool-sep"></span>
+                    <button type="button" class="editor-tool" id="editor-font-dec" title="{% trans %}Smaller font{% endtrans %}" aria-label="{% trans %}Smaller font{% endtrans %}">A&minus;</button>
+                    <button type="button" class="editor-tool" id="editor-font-inc" title="{% trans %}Larger font{% endtrans %}" aria-label="{% trans %}Larger font{% endtrans %}">A+</button>
+                    <button type="button" class="editor-tool" id="editor-theme"></button>
+                    <input type="file" id="editor-load-file" class="editor-hidden-input" tabindex="-1"/>
+                </div>
+            </div>
+            <div id="code-editor" class="code-editor"></div>
+            <div class="editor-statusbar">
+                <span id="editor-cursor"></span>
+                <span id="editor-size"></span>
+                <span id="editor-draft-state"></span>
+                <span class="editor-shortcuts">
+                    {% if can_run %}<kbd>Ctrl</kbd>+<kbd>Enter</kbd> {% trans %}run{% endtrans %} &middot;{% endif %}
+                    <kbd>Ctrl</kbd>+<kbd>S</kbd> {% trans %}save draft{% endtrans %} &middot;
+                    <kbd>Ctrl</kbd>+<kbd>/</kbd> {% trans %}comment{% endtrans %}
+                </span>
+            </div>
+        </div>
+
+{% if can_run %}
+        <div class="editor-run-panel">
+            <div class="editor-run-col">
+                <div class="editor-run-head">
+                    <label for="editor-stdin" class="editor-label">{% trans %}Custom input{% endtrans %}</label>
+                    <button type="button" class="editor-tool" id="editor-stdin-load">{% trans %}Load file{% endtrans %}</button>
+                    <input type="file" id="editor-stdin-file" class="editor-hidden-input" tabindex="-1"/>
+                </div>
+                <textarea id="editor-stdin" class="editor-io" spellcheck="false" placeholder="{% trans %}Type the input for your program here{% endtrans %}"></textarea>
+            </div>
+            <div class="editor-run-col" id="editor-result">
+                <div class="editor-run-head">
+                    <span class="editor-label">{% trans %}Output{% endtrans %}</span>
+                    <span id="editor-result-state" class="label">{% trans %}Not run yet{% endtrans %}</span>
+                    <span id="editor-result-time" class="editor-metric"></span>
+                    <span id="editor-result-memory" class="editor-metric"></span>
+                    <a id="editor-result-download" class="editor-tool" style="display: none;" target="_blank">{% trans %}Download{% endtrans %}</a>
+                </div>
+                <pre id="editor-result-output" class="editor-io">{% trans %}Run your code to see its output here. Runs do not count as submissions.{% endtrans %}</pre>
+                <details id="editor-result-details" style="display: none;">
+                    <summary>{% trans %}Compilation and execution details{% endtrans %}</summary>
+                    <div class="editor-details-body"></div>
+                </details>
+            </div>
+        </div>
+{% endif %}
+
+        <div id="editor-message" class="alert" style="display: none;" role="alert"></div>
+
+        <div class="editor-actions">
+{% if can_run %}
+            <button type="button" id="editor-run" class="btn">&#9654; {% trans %}Run{% endtrans %}</button>
+{% endif %}
+            <button type="submit" id="editor-submit" class="btn btn-success">{% trans %}Submit{% endtrans %}</button>
+        </div>
+    </form>
+</div>
+<script type="application/json" id="cws-editor-config">{{ editor_config|tojson }}</script>
+<script type="application/json" id="cws-editor-strings">{{ {
+    "draft_restored": _("Draft restored from this browser."),
+    "draft_unsaved": _("Editing..."),
+    "draft_saved": _("Draft saved in this browser."),
+    "draft_saved_now": _("Draft saved."),
+    "draft_not_saved": _("Could not save the draft in this browser."),
+    "size": _("%(size)s / %(limit)s bytes"),
+    "cursor": _("Ln %(line)s, Col %(col)s"),
+    "light": _("Light"),
+    "dark": _("Dark"),
+    "confirm_clear": _("Clear the editor? This cannot be undone."),
+    "load_failed": _("Could not read the file."),
+    "empty_code": _("The code is empty."),
+    "too_long": _("The code is too long (%(size)s bytes, the limit is %(limit)s)."),
+    "input_too_long": _("The input is too long (%(size)s bytes, the limit is %(limit)s)."),
+    "bad_reply": _("Unexpected reply from the server: you may have been logged out. Reload the page (your code is saved in this browser)."),
+    "timeout": _("The server did not answer in time. Please try again."),
+    "network_error": _("Cannot reach the server. Check your connection and try again; your code is saved in this browser."),
+    "forbidden": _("The request was refused. Reload the page and try again (your code is saved in this browser)."),
+    "server_error": _("The server returned an error (HTTP %(status)s). Please try again."),
+    "submitting": _("Submitting..."),
+    "submitted": _("Submission received, reloading..."),
+    "running": _("Running..."),
+    "sending": _("Sending..."),
+    "run_failed": _("Not run"),
+    "compiling": _("Compiling..."),
+    "executing": _("Executing..."),
+    "compilation_failed": _("Compilation failed"),
+    "see_details": _("The code did not compile: see the compiler messages below."),
+    "executed": _("Executed"),
+    "still_running": _("Still running; check the Testing page later"),
+    "time": _("Time: %(time)s"),
+    "memory": _("Memory: %(memory)s"),
+    "no_output": _("The program produced no output file."),
+    "empty_output": _("(empty output)"),
+    "output_truncated": _("[output truncated, download it to see it all]"),
+    "output_unavailable": _("The output is not available."),
+}|tojson }}</script>
 {% endif %}
 </div>
 

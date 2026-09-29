@@ -291,6 +291,26 @@ class ContestHandler(BaseHandler):
     def notify_error(self, subject, text, text_params=None):
         self.add_notification(subject, text, NOTIFICATION_ERROR, text_params)
 
+    def wants_json_response(self):
+        """Return whether the client asked for a JSON reply.
+
+        The in-browser code editor posts submissions and user tests via
+        XHR and asks (with the response_format=json form field) for a
+        JSON answer instead of the usual redirect, so that it can show
+        the outcome without reloading the page and losing the code.
+
+        """
+        return self.get_argument("response_format", None) == "json"
+
+    def write_json_error(self, subject, text, text_params=None):
+        """Reply with a JSON-encoded, translated error message."""
+        text = self._(text)
+        if text_params is not None:
+            text %= text_params
+        self.write({"success": False,
+                    "subject": self._(subject),
+                    "text": text})
+
 
 class FileHandler(ContestHandler, FileHandlerMixin):
     pass

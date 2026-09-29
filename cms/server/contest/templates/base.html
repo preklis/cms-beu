@@ -9,13 +9,9 @@
         <link rel="shortcut icon" href="{{ url("static", "favicon.ico") }}" />
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Serif:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Serif:ital,wght@0,500;1,500&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="{{ url("static", "css", "bootstrap.css") }}">
-        <link rel="stylesheet" href="{{ url("static", "cws_style.css", v="20260410f") }}">
-
-        <!-- CodeMirror for code editor -->
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/theme/monokai.min.css">
+        <link rel="stylesheet" href="{{ url("static", "cws_style.css", v="20260929a") }}">
 
         <script src="{{ url("static", "jq", "jquery-3.6.0.min.js") }}"></script>
         {# For compatibility with Bootstrap 2.x #}
@@ -23,10 +19,8 @@
         <script src="{{ url("static", "js", "bootstrap.js") }}"></script>
         <script src="{{ url("static", "cws_utils.js") }}"></script>
 
-        <!-- CodeMirror for code editor -->
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/clike/clike.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/python/python.min.js"></script>
+        {# Page-specific assets (e.g., the code editor). #}
+        {% block head_extra %}{% endblock head_extra %}
 
         {% block js %}{% endblock js %}
     </head>

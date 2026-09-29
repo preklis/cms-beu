@@ -1,267 +1,471 @@
 #!/usr/bin/env python3
-"""
-CMS Ranking/Proxy Watchdog - Auto-restart and health monitoring
 
-This script monitors cmsRankingWebServer and cmsProxyService, automatically
-restarting them if they crash while respecting ResourceService availability.
-Ensures historical submissions are backfilled on startup.
+# Contest Management System - BEU fork
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+"""CMS ranking/proxy watchdog: health monitoring and automatic restart.
+
+Keeps cmsRankingWebServer and cmsProxyService alive:
+
+- a service whose process died is restarted;
+- a service that is alive but does not answer for several consecutive
+  checks (hung) is killed and restarted;
+- repeated crashes are restarted with an exponential backoff, so that a
+  service that cannot start does not spin in a tight loop;
+- nothing is started until ResourceService is reachable;
+- services that were started by someone else and are healthy are left
+  alone (no duplicates).
+
+When ProxyService (re)starts it replays all the scores and tokens, so
+the ranking is back-filled automatically.
+
+Run "cms-watchdog.py --help" for the options, and see docs/WATCHDOG.md
+and man.txt for the details.
+
 """
 
-import subprocess
-import time
-import sys
+import argparse
+import json
+import logging
 import os
 import signal
-import json
-import urllib.request
+import socket
+import subprocess
+import sys
+import time
 import urllib.error
-import logging
-from datetime import datetime
-from pathlib import Path
-
-# Configuration
-CMS_HOME = "/home/arazoglu/cms"
-LOG_FILE = "/tmp/cms-watchdog.log"
-RESOURCE_SERVICE_PORT = 8001
-RANKING_SERVICE_PORT = 8890
-CHECK_INTERVAL = 30  # seconds between health checks
-RESTART_COOLDOWN = 5  # seconds to wait before restarting after crash
-RESOURCE_STABILITY_WAIT = 10  # seconds to wait for ResourceService to stabilize
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+import urllib.request
+from urllib.parse import urlsplit
 
 
-class CMSWatchdog:
-    def __init__(self):
-        self.ranking_process = None
-        self.proxy_process = None
-        self.running = True
-        self.last_restart_time = {}
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+logger = logging.getLogger("cms-watchdog")
 
-    def _signal_handler(self, sig, frame):
-        """Handle shutdown signals gracefully"""
-        logger.info(f"Received signal {sig}, shutting down watchdog...")
-        self.running = False
-        self._cleanup()
-        sys.exit(0)
+DEFAULT_CMS_HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_LOG_DIR = "/var/local/log/cms"
+CONFIG_PATHS = ["/usr/local/etc/cms.conf", "/etc/cms.conf"]
 
-    def _cleanup(self):
-        """Clean up processes on shutdown"""
-        for process, name in [(self.ranking_process, "ranking"), (self.proxy_process, "proxy")]:
-            if process and process.poll() is None:
-                logger.info(f"Terminating {name} process (PID {process.pid})")
-                try:
-                    process.terminate()
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Force killing {name} process")
-                    process.kill()
 
-    def is_resource_service_healthy(self):
-        """Check if ResourceService is running and responsive"""
+def load_cms_config(path=None):
+    """Return the CMS configuration (as a dict), or {} if unavailable."""
+    paths = list(CONFIG_PATHS)
+    if os.environ.get("CMS_CONFIG"):
+        paths.insert(0, os.environ["CMS_CONFIG"])
+    if path is not None:
+        paths = [path]
+    for candidate in paths:
         try:
-            # First try HTTP check on configured port
-            try:
-                response = urllib.request.urlopen(
-                    f'http://127.0.0.1:{RESOURCE_SERVICE_PORT}/ping',
-                    timeout=2
-                )
-                return response.status == 200
-            except (urllib.error.URLError, urllib.error.HTTPError):
-                # If HTTP check fails, check if process is running
-                # This gives ResourceService time to fully initialize
-                result = subprocess.run(
-                    ['pgrep', '-f', 'cmsResourceService'],
-                    capture_output=True,
-                    timeout=2
-                )
-                return result.returncode == 0
-        except (Exception,):
-            return False
+            with open(candidate, "rt", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as error:
+            logger.warning("Cannot read CMS config %s: %s", candidate, error)
+    return {}
 
-    def is_ranking_service_healthy(self):
-        """Check if RankingWebServer is running and responsive"""
-        try:
-            response = urllib.request.urlopen(
-                f'http://127.0.0.1:{RANKING_SERVICE_PORT}/contests/',
-                timeout=2
-            )
-            return response.status == 200
-        except (urllib.error.URLError, urllib.error.HTTPError, Exception):
-            return False
 
-    def is_proxy_service_running(self):
-        """Check if ProxyService process is alive"""
-        if self.proxy_process and self.proxy_process.poll() is None:
+def service_address(cms_config, section, name, default):
+    """Return the (host, port) of shard 0 of a service in cms.conf."""
+    try:
+        host, port = cms_config[section][name][0]
+        return host, int(port)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return default
+
+
+def ranking_url(cms_config, default):
+    """Return the URL of the first ranking, without credentials."""
+    try:
+        url = cms_config["rankings"][0]
+    except (KeyError, IndexError, TypeError):
+        return default
+    parts = urlsplit(url)
+    netloc = parts.hostname or "127.0.0.1"
+    if parts.port is not None:
+        netloc += ":%d" % parts.port
+    return parts._replace(netloc=netloc).geturl()
+
+
+def port_open(host, port, timeout=2.0):
+    """Return whether something accepts TCP connections on host:port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
             return True
+    except OSError:
         return False
 
-    def start_ranking_service(self):
-        """Start cmsRankingWebServer"""
-        if self.ranking_process and self.ranking_process.poll() is None:
-            logger.debug("Ranking service already running")
-            return True
 
-        logger.info("Starting cmsRankingWebServer...")
+def process_running(program):
+    """Return whether a process running the given CMS program exists.
+
+    Only command lines where the program appears as an executable (at
+    the start, or after a "/", followed by a space or the end) match,
+    so that e.g. "less cmsRankingWebServer.log" or an editor does not.
+
+    """
+    pattern = r"(^|[ /])%s( |$)" % program
+    try:
+        result = subprocess.run(["pgrep", "-f", pattern],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+class ManagedService:
+    """A service started, checked and restarted by the watchdog."""
+
+    def __init__(self, name, command, cwd, log_path, health_check,
+                 process_pattern, args):
+        self.name = name
+        self.command = command
+        self.cwd = cwd
+        self.log_path = log_path
+        self.health_check = health_check
+        self.process_pattern = process_pattern
+        self.args = args
+
+        self.process = None
+        self.log_file = None
+        self.started_at = None
+        self.failed_checks = 0
+        self.consecutive_restarts = 0
+        self.next_start_allowed = 0.0
+
+    # State.
+
+    def own_process_alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def healthy(self):
         try:
-            self.ranking_process = subprocess.Popen(
-                ["cmsRankingWebServer"],
-                cwd=CMS_HOME,
-                stdout=open("/tmp/cms-ranking.log", "a"),
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid
-            )
-            logger.info(f"Started ranking service (PID {self.ranking_process.pid})")
-            time.sleep(2)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start ranking service: {e}")
+            return self.health_check()
+        except Exception:
+            logger.debug("%s health check raised.", self.name, exc_info=True)
             return False
 
-    def start_proxy_service(self):
-        """Start cmsProxyService in multicontest mode"""
-        if self.proxy_process and self.proxy_process.poll() is None:
-            logger.debug("Proxy service already running")
-            return True
+    def in_grace_period(self):
+        return (self.started_at is not None
+                and time.monotonic() - self.started_at < self.args.grace)
 
-        logger.info("Starting cmsProxyService (multicontest mode)...")
-        try:
-            self.proxy_process = subprocess.Popen(
-                ["scripts/cmsProxyService", "-c", "ALL", "0"],
-                cwd=CMS_HOME,
-                stdout=open("/tmp/cms-proxy.log", "a"),
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid
-            )
-            logger.info(f"Started proxy service (PID {self.proxy_process.pid})")
-            logger.info("Proxy initialized: missed-operations replay will backfill submissions")
-            time.sleep(3)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start proxy service: {e}")
+    # Actions.
+
+    def start(self):
+        now = time.monotonic()
+        if now < self.next_start_allowed:
+            logger.info("%s: waiting %.0fs before the next restart attempt.",
+                        self.name, self.next_start_allowed - now)
             return False
 
-    def restart_services(self):
-        """Restart ranking and proxy services"""
-        # Check if ResourceService is healthy first
-        if not self.is_resource_service_healthy():
-            logger.warning("ResourceService not healthy yet, waiting before restart...")
-            for i in range(RESOURCE_STABILITY_WAIT):
-                if self.is_resource_service_healthy():
-                    logger.info("ResourceService is now healthy")
-                    break
-                time.sleep(1)
-            else:
-                logger.error("ResourceService did not stabilize, skipping restart")
-                return False
+        self._close_log()
+        logger.info("Starting %s: %s", self.name, " ".join(self.command))
+        try:
+            self.log_file = open(self.log_path, "ab")
+            self.process = subprocess.Popen(
+                self.command, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                stdout=self.log_file, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        except OSError as error:
+            logger.error("Cannot start %s: %s", self.name, error)
+            self._close_log()
+            self._schedule_backoff()
+            return False
 
-        # Give ResourceService a moment to be fully ready
-        time.sleep(1)
+        logger.info("%s started (PID %d, output in %s).",
+                    self.name, self.process.pid, self.log_path)
+        self.started_at = time.monotonic()
+        self.failed_checks = 0
+        self._schedule_backoff()
+        return True
 
-        # Restart in order: ranking first (data sink), then proxy (data source)
-        success = True
-        if not self.start_ranking_service():
-            success = False
-        if not self.start_proxy_service():
-            success = False
+    def stop(self, reason):
+        if not self.own_process_alive():
+            self._close_log()
+            return
+        logger.warning("Stopping %s (PID %d): %s.",
+                       self.name, self.process.pid, reason)
+        self._signal_group(signal.SIGTERM)
+        try:
+            self.process.wait(timeout=self.args.stop_timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning("%s did not stop in %ds, killing it.",
+                           self.name, self.args.stop_timeout)
+            self._signal_group(signal.SIGKILL)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.error("%s (PID %d) survived SIGKILL.",
+                             self.name, self.process.pid)
+        self._close_log()
 
-        if success:
-            logger.info("✓ Both services restarted successfully")
-        else:
-            logger.warning("⚠ Restart partially failed, will retry at next check")
+    def _signal_group(self, sig):
+        # The service runs in its own session: signal all its children.
+        try:
+            os.killpg(self.process.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                self.process.send_signal(sig)
+            except OSError:
+                pass
 
-        return success
+    def _close_log(self):
+        if self.log_file is not None:
+            try:
+                self.log_file.close()
+            except OSError:
+                pass
+            self.log_file = None
 
-    def check_and_recover(self):
-        """Check service health and recover if needed"""
-        ranking_healthy = self.is_ranking_service_healthy()
-        proxy_alive = self.is_proxy_service_running()
+    def _schedule_backoff(self):
+        # Exponential backoff between (re)starts; reset once the service
+        # has been running fine for a while (see check()).
+        delay = min(self.args.backoff_max,
+                    self.args.backoff_min * (2 ** self.consecutive_restarts))
+        self.next_start_allowed = time.monotonic() + delay
+        self.consecutive_restarts += 1
 
-        status = []
-        if ranking_healthy:
-            status.append("ranking:✓")
-        else:
-            status.append("ranking:✗")
+    # The main logic, called at every tick.
 
-        if proxy_alive:
-            status.append("proxy:✓")
-        else:
-            status.append("proxy:✗")
+    def check(self):
+        """Check the service and act. Return a short status string."""
+        if self.healthy():
+            self.failed_checks = 0
+            if self.started_at is not None and \
+                    time.monotonic() - self.started_at > self.args.stable_after:
+                self.consecutive_restarts = 0
+            return "ok"
 
-        logger.info(f"Health check: {' | '.join(status)}")
+        if self.own_process_alive():
+            if self.in_grace_period():
+                return "starting"
+            self.failed_checks += 1
+            if self.failed_checks < self.args.max_failed_checks:
+                logger.warning("%s is running but not responding "
+                               "(%d/%d).", self.name, self.failed_checks,
+                               self.args.max_failed_checks)
+                return "unresponsive"
+            self.stop("not responding for %d checks" % self.failed_checks)
+            self.process = None
+        elif self.process is not None:
+            logger.warning("%s exited with code %s.",
+                           self.name, self.process.returncode)
+            self.process = None
+            self._close_log()
+        elif self.process_pattern is not None \
+                and process_running(self.process_pattern):
+            # Started by someone else and not healthy: we cannot manage
+            # it, and starting a second copy would only fail.
+            logger.warning("%s is running outside the watchdog but not "
+                           "responding; not touching it.", self.name)
+            return "foreign"
 
-        # Determine what needs recovery
-        needs_recovery = not ranking_healthy or not proxy_alive
+        return "restarting" if self.start() else "down"
 
-        if needs_recovery:
-            # Check cooldown
-            now = time.time()
-            last_restart = self.last_restart_time.get('services', 0)
-            time_since_restart = now - last_restart
 
-            if time_since_restart < RESTART_COOLDOWN:
-                wait_time = RESTART_COOLDOWN - time_since_restart
-                logger.info(f"Recent restart detected, waiting {wait_time:.1f}s before retry...")
-                return
+class Watchdog:
 
-            logger.warning(f"Service failure detected: ranking={ranking_healthy}, proxy={proxy_alive}")
-            if self.restart_services():
-                self.last_restart_time['services'] = now
-        else:
-            logger.debug("All services healthy")
+    def __init__(self, args):
+        self.args = args
+        self.running = True
+        cms_config = load_cms_config(args.config)
+
+        self.resource_address = service_address(
+            cms_config, "core_services", "ResourceService",
+            ("127.0.0.1", 28000))
+        self.proxy_address = service_address(
+            cms_config, "core_services", "ProxyService", ("127.0.0.1", 28600))
+        self.ranking = args.ranking_url or ranking_url(
+            cms_config, "http://127.0.0.1:8890/")
+
+        def bin_path(name):
+            local = os.path.join(args.cms_home, "scripts", name)
+            return local if os.path.exists(local) else name
+
+        proxy_cmd = [bin_path("cmsProxyService")]
+        if args.contest == "ALL":
+            proxy_cmd += ["-c", "ALL"]
+        elif args.contest is not None:
+            proxy_cmd += ["-c", args.contest]
+        proxy_cmd += ["0"]
+
+        self.services = []
+        if not args.no_ranking:
+            self.services.append(ManagedService(
+                "RankingWebServer", [bin_path("cmsRankingWebServer")],
+                args.cms_home, os.path.join(args.log_dir, "ranking.log"),
+                self.ranking_healthy, "cmsRankingWebServer", args))
+        if not args.no_proxy:
+            self.services.append(ManagedService(
+                "ProxyService", proxy_cmd, args.cms_home,
+                os.path.join(args.log_dir, "proxy.log"),
+                lambda: port_open(*self.proxy_address), "cmsProxyService",
+                args))
+
+    def ranking_healthy(self):
+        url = self.ranking.rstrip("/") + "/contests/"
+        try:
+            with urllib.request.urlopen(url, timeout=self.args.http_timeout):
+                return True
+        except urllib.error.HTTPError as error:
+            # Any HTTP answer (even 401/404) means the server is alive.
+            return error.code < 500
+        except (urllib.error.URLError, OSError, ValueError):
+            return False
+
+    def resource_service_up(self):
+        return port_open(*self.resource_address) \
+            or process_running("cmsResourceService")
+
+    def tick(self):
+        if not self.resource_service_up():
+            logger.warning("ResourceService is not reachable at %s:%d; "
+                           "not starting anything until it is.",
+                           *self.resource_address)
+            return
+        states = []
+        for service in self.services:
+            states.append("%s:%s" % (service.name, service.check()))
+        logger.info("Health: %s", " | ".join(states))
+
+    def status(self):
+        """Print a one-shot health report; return a process exit code."""
+        ok = True
+        rs = self.resource_service_up()
+        ok = ok and rs
+        print("ResourceService  %-4s (%s:%d)" % (
+            "up" if rs else "DOWN", *self.resource_address))
+        for service in self.services:
+            healthy = service.healthy()
+            ok = ok and healthy
+            where = self.ranking if service.name == "RankingWebServer" \
+                else "%s:%d" % self.proxy_address
+            print("%-16s %-4s (%s)" % (service.name,
+                                       "up" if healthy else "DOWN", where))
+        return 0 if ok else 1
+
+    def stop(self, *_):
+        logger.info("Shutdown requested.")
+        self.running = False
 
     def run(self):
-        """Main watchdog loop"""
-        logger.info("=" * 60)
-        logger.info("CMS Watchdog started")
-        logger.info("Monitoring: cmsRankingWebServer + cmsProxyService (-c ALL 0)")
-        logger.info(f"Check interval: {CHECK_INTERVAL}s")
-        logger.info(f"ResourceService port: {RESOURCE_SERVICE_PORT}")
-        logger.info(f"Ranking service port: {RANKING_SERVICE_PORT}")
-        logger.info("=" * 60)
-
-        # Initial startup of all services
-        if not self.is_resource_service_healthy():
-            logger.warning("ResourceService not available at startup, waiting...")
-            for i in range(30):
-                if self.is_resource_service_healthy():
-                    logger.info("ResourceService is now available")
-                    break
-                time.sleep(1)
-            else:
-                logger.error("ResourceService not available after 30s, cannot proceed")
-                return
-
-        logger.info("Starting services...")
-        self.restart_services()
-
-        # Main monitoring loop
+        signal.signal(signal.SIGTERM, self.stop)
+        signal.signal(signal.SIGINT, self.stop)
+        logger.info("CMS watchdog started (CMS home %s, check every %ds, "
+                    "ranking %s, proxy %s:%d, ResourceService %s:%d).",
+                    self.args.cms_home, self.args.interval, self.ranking,
+                    *self.proxy_address, *self.resource_address)
         while self.running:
             try:
-                time.sleep(CHECK_INTERVAL)
-                self.check_and_recover()
-            except KeyboardInterrupt:
-                logger.info("Watchdog interrupted, shutting down...")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in watchdog loop: {e}", exc_info=True)
-                time.sleep(CHECK_INTERVAL)
+                self.tick()
+            except Exception:
+                logger.error("Unexpected error in the watchdog loop.",
+                             exc_info=True)
+            # Sleep in small steps to react quickly to signals.
+            deadline = time.monotonic() + self.args.interval
+            while self.running and time.monotonic() < deadline:
+                time.sleep(min(1.0, deadline - time.monotonic()))
 
-        self._cleanup()
-        logger.info("CMS Watchdog stopped")
+        if self.args.keep_services:
+            logger.info("Leaving the services running (--keep-services).")
+        else:
+            for service in reversed(self.services):
+                service.stop("watchdog shutting down")
+        logger.info("CMS watchdog stopped.")
+
+
+def parse_args(argv=None):
+    env = os.environ.get
+    parser = argparse.ArgumentParser(
+        description="Keep cmsRankingWebServer and cmsProxyService running.")
+    parser.add_argument("command", nargs="?", default="run",
+                        choices=["run", "status"],
+                        help="run the watchdog (default), or print the "
+                        "health of the services and exit (0 if all up)")
+    parser.add_argument("--cms-home", default=env("CMS_HOME", DEFAULT_CMS_HOME),
+                        help="CMS checkout directory (default: %(default)s)")
+    parser.add_argument("--config", default=None,
+                        help="path of cms.conf (default: $CMS_CONFIG, "
+                        "/usr/local/etc/cms.conf, /etc/cms.conf)")
+    parser.add_argument("--ranking-url", default=env("CMS_WATCHDOG_RANKING_URL"),
+                        help="ranking URL to probe (default: first entry of "
+                        "\"rankings\" in cms.conf)")
+    parser.add_argument("-c", "--contest", default=env("CMS_WATCHDOG_CONTEST", "ALL"),
+                        help="contest id for ProxyService, or ALL for "
+                        "multi-contest mode (default: %(default)s)")
+    parser.add_argument("--log-dir", default=env("CMS_WATCHDOG_LOG_DIR", DEFAULT_LOG_DIR),
+                        help="directory of the watchdog and service logs "
+                        "(default: %(default)s)")
+    parser.add_argument("--interval", type=int, default=int(env("CMS_WATCHDOG_INTERVAL", "15")),
+                        help="seconds between health checks (default: %(default)s)")
+    parser.add_argument("--max-failed-checks", type=int, default=4,
+                        help="consecutive failed checks of a running service "
+                        "before it is considered hung and restarted "
+                        "(default: %(default)s)")
+    parser.add_argument("--grace", type=int, default=30,
+                        help="seconds a freshly started service may take to "
+                        "become healthy (default: %(default)s)")
+    parser.add_argument("--backoff-min", type=int, default=5,
+                        help="minimum seconds between restarts (default: %(default)s)")
+    parser.add_argument("--backoff-max", type=int, default=300,
+                        help="maximum seconds between restarts (default: %(default)s)")
+    parser.add_argument("--stable-after", type=int, default=600,
+                        help="seconds of good health after which the backoff "
+                        "resets (default: %(default)s)")
+    parser.add_argument("--stop-timeout", type=int, default=15,
+                        help="seconds to wait after SIGTERM before SIGKILL "
+                        "(default: %(default)s)")
+    parser.add_argument("--http-timeout", type=float, default=5.0,
+                        help="timeout of the ranking HTTP probe (default: %(default)s)")
+    parser.add_argument("--no-ranking", action="store_true",
+                        help="do not manage cmsRankingWebServer")
+    parser.add_argument("--no-proxy", action="store_true",
+                        help="do not manage cmsProxyService")
+    parser.add_argument("--keep-services", action="store_true",
+                        help="leave the services running when the watchdog stops")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="log debug messages")
+    return parser.parse_args(argv)
+
+
+def setup_logging(args):
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if args.command == "run":
+        try:
+            os.makedirs(args.log_dir, exist_ok=True)
+            handlers.append(logging.FileHandler(
+                os.path.join(args.log_dir, "watchdog.log")))
+        except OSError as error:
+            print("Cannot write logs in %s: %s" % (args.log_dir, error),
+                  file=sys.stderr)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    setup_logging(args)
+    watchdog = Watchdog(args)
+    if args.command == "status":
+        return watchdog.status()
+    watchdog.run()
+    return 0
 
 
 if __name__ == "__main__":
-    watchdog = CMSWatchdog()
-    watchdog.run()
+    sys.exit(main())
