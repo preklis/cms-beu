@@ -2019,243 +2019,389 @@ td.token_rules p:last-child {
     }
 }
 
-/*** Code Editor Styles ***/
+/*** Code Editor ***/
 
-/* Submission mode toggle */
+/* Submission mode toggle (upload files / write code) */
 .submission-mode-toggle {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 24px;
-    padding: 0;
-    width: 100%;
-    flex-wrap: wrap;
+    display: inline-flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    padding: 4px;
+    border: 1px solid var(--cws-line);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.75);
 }
 
 .mode-toggle-btn {
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.82));
-    border: 2px solid var(--cws-line);
-    border-radius: 10px;
-    padding: 10px 18px;
+    background: transparent;
+    border: 0;
+    border-radius: 9px;
+    padding: 8px 18px;
     font-weight: 600;
     font-size: 14px;
     color: var(--cws-muted);
     cursor: pointer;
-    transition: all 0.18s ease;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
+    transition: background 0.15s ease, color 0.15s ease;
 }
 
 .mode-toggle-btn:hover {
-    border-color: var(--cws-accent);
     color: var(--cws-accent);
-    box-shadow: 0 4px 12px rgba(11, 102, 194, 0.15);
-    transform: translateY(-1px);
+}
+
+.mode-toggle-btn:focus-visible,
+.editor-tool:focus-visible,
+.editor-file-tab:focus-visible {
+    outline: 2px solid var(--cws-accent);
+    outline-offset: 2px;
 }
 
 .mode-toggle-btn.active {
-    background: linear-gradient(135deg, var(--cws-accent-2), #2196F3);
-    border-color: var(--cws-accent);
-    color: white;
-    box-shadow: 0 6px 18px rgba(11, 102, 194, 0.25);
+    background: var(--cws-accent);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(11, 102, 194, 0.25);
 }
 
-/* Code editor container */
-.code-editor {
-    height: 600px;
-    width: 100%;
-    box-sizing: border-box;
-    border: 2px solid var(--cws-line);
-    border-radius: 10px;
-    overflow: hidden;
-    margin-bottom: 16px;
-    background: white;
-    box-shadow: 0 4px 12px rgba(10, 34, 67, 0.08);
-}
-
-/* CodeMirror customization */
-.CodeMirror {
-    font-family: "IBM Plex Mono", "Courier New", monospace !important;
-    font-size: 13px !important;
-    line-height: 1.5 !important;
-    height: 100% !important;
-    border: none !important;
-}
-
-.CodeMirror-linenumber,
-.CodeMirror-linenumbers {
-    background: linear-gradient(180deg, rgba(17, 36, 61, 0.02), rgba(11, 102, 194, 0.02));
-    color: #999;
-}
-
-.CodeMirror-scrollbar-filler,
-.CodeMirror-gutter-filler {
-    background-color: white;
-}
-
-.CodeMirror-line::selection,
-.CodeMirror-line > span::selection,
-.CodeMirror-line > span > span::selection {
-    background: rgba(11, 102, 194, 0.15);
-}
-
-.CodeMirror-line::-moz-selection,
-.CodeMirror-line > span::-moz-selection,
-.CodeMirror-line > span > span::-moz-selection {
-    background: rgba(11, 102, 194, 0.15);
-}
-
-.CodeMirror-cursor {
-    border-left: 2px solid var(--cws-accent);
-}
-
-.CodeMirror-activeline-background {
-    background: rgba(11, 102, 194, 0.05);
-}
-
-.CodeMirror-matchingbracket {
-    color: var(--cws-accent);
-    font-weight: bold;
-}
-
-.CodeMirror-nonmatchingbracket {
-    color: #c62f31;
-}
-
-/* Code editor form styling */
-#editor-mode .control-group {
-    margin-bottom: 16px;
-}
-
-#editor-mode .control-label {
-    font-weight: 600;
-    color: var(--cws-ink);
-    font-size: 14px;
-    margin-bottom: 8px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-}
-
-#editor-mode select {
-    border: 2px solid var(--cws-line);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-family: "Space Grotesk", sans-serif;
-    color: var(--cws-ink);
-    background: white;
-    width: 100%;
-    max-width: 100%;
-    box-sizing: border-box;
-    font-weight: 500;
-    transition: all 0.18s ease;
-}
-
-#editor-mode select:focus {
-    outline: none;
-    border-color: var(--cws-accent);
-    box-shadow: 0 0 0 3px rgba(11, 102, 194, 0.08);
-}
-
-/* Submission mode containers */
 .submission-mode-container {
-    width: 100%;
     box-sizing: border-box;
-    animation: fade-in 0.3s ease-out;
 }
 
-/* Upload mode form styling adjustments */
-#upload-mode .control-group {
-    margin-bottom: 16px;
+#editor-mode {
+    clear: both;
+    margin-bottom: 8px;
 }
 
-#upload-mode .control-label {
+/* Upload mode form */
+#upload-mode .control-label,
+#upload-zip-mode .control-label {
     font-weight: 600;
     color: var(--cws-ink);
-    font-size: 14px;
-    margin-bottom: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
 }
 
-#upload-mode input[type="file"],
-#upload-mode select {
-    border: 2px solid var(--cws-line);
+/* Workspace: toolbar + editor + status bar */
+.editor-workspace {
+    --ed-bg: #ffffff;
+    --ed-bar: #f3f7fc;
+    --ed-line: rgba(14, 55, 97, 0.14);
+    --ed-text: var(--cws-ink);
+    --ed-muted: var(--cws-muted);
+    border: 1px solid var(--ed-line);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--ed-bg);
+    box-shadow: 0 6px 20px rgba(10, 34, 67, 0.08);
+}
+
+.editor-workspace.editor-dark {
+    --ed-bg: #272822;
+    --ed-bar: #1e1f1c;
+    --ed-line: rgba(255, 255, 255, 0.12);
+    --ed-text: #f1f1ec;
+    --ed-muted: #a6a69c;
+}
+
+.editor-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 18px;
+    padding: 8px 12px;
+    background: var(--ed-bar);
+    border-bottom: 1px solid var(--ed-line);
+    color: var(--ed-text);
+}
+
+.editor-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.editor-files {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.editor-tools {
+    margin-left: auto;
+    flex-wrap: wrap;
+}
+
+.editor-filename {
+    font-family: "IBM Plex Mono", Menlo, Consolas, monospace;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.editor-file-tab {
+    border: 1px solid var(--ed-line);
     border-radius: 8px;
-    padding: 10px 12px;
-    font-family: "Space Grotesk", sans-serif;
-    color: var(--cws-ink);
-    background: white;
-    width: 100%;
-    max-width: 100%;
-    box-sizing: border-box;
-    transition: all 0.18s ease;
+    background: transparent;
+    color: var(--ed-muted);
+    padding: 4px 10px;
+    font-family: "IBM Plex Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    cursor: pointer;
 }
 
-#upload-mode input[type="file"]:focus,
-#upload-mode select:focus {
-    outline: none;
+.editor-file-tab.active {
+    background: var(--cws-accent);
     border-color: var(--cws-accent);
-    box-shadow: 0 0 0 3px rgba(11, 102, 194, 0.08);
+    color: #fff;
 }
 
-/* Button styles in code editor form */
-#editor-form .btn,
-#upload-mode .btn {
-    margin-right: 8px;
-    margin-top: 0;
+.editor-label {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ed-muted);
 }
 
-#editor-form .btn-success,
-#upload-mode .btn-success {
-    background: linear-gradient(135deg, #4CAF50, #45a049);
-    border: 1px solid rgba(76, 175, 80, 0.3);
-    color: white;
-    font-weight: 600;
-    padding: 10px 20px;
+.editor-workspace select.editor-select {
+    width: auto;
+    min-width: 170px;
+    height: auto;
+    margin: 0;
+    padding: 4px 8px;
+    line-height: 20px;
+    font-size: 14px;
+    border: 1px solid var(--ed-line);
     border-radius: 8px;
-    transition: all 0.18s ease;
+    background: var(--ed-bg);
+    color: var(--ed-text);
 }
 
-#editor-form .btn-success:hover,
-#upload-mode .btn-success:hover {
-    background: linear-gradient(135deg, #45a049, #3d8b40);
-    box-shadow: 0 6px 16px rgba(76, 175, 80, 0.25);
-    transform: translateY(-2px);
-}
-
-#editor-form .btn:not(.btn-success),
-#upload-mode .btn:not(.btn-success) {
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.88));
+.editor-tool {
+    display: inline-block;
     border: 1px solid var(--cws-line);
-    color: var(--cws-muted);
-    font-weight: 600;
-    padding: 10px 20px;
     border-radius: 8px;
-    transition: all 0.18s ease;
+    background: rgba(255, 255, 255, 0.9);
+    color: var(--cws-ink);
+    padding: 3px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 20px;
+    cursor: pointer;
+    text-decoration: none;
 }
 
-#editor-form .btn:not(.btn-success):hover,
-#upload-mode .btn:not(.btn-success):hover {
-    background: #ffffff;
-    border-color: var(--cws-muted);
-    box-shadow: 0 4px 12px rgba(10, 34, 67, 0.1);
-    transform: translateY(-2px);
+.editor-tool:hover {
+    border-color: var(--cws-accent);
+    color: var(--cws-accent);
+    text-decoration: none;
 }
 
-/* Responsive design for code editor */
-@media (max-width: 640px) {
+.editor-dark .editor-tool {
+    background: #3a3b35;
+    border-color: var(--ed-line);
+    color: var(--ed-text);
+}
+
+.editor-tool-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--ed-line);
+    margin: 0 2px;
+}
+
+.editor-hidden-input {
+    display: none;
+}
+
+.code-editor {
+    height: 520px;
+    font-size: 14px;
+}
+
+.code-editor .CodeMirror {
+    height: 100%;
+    font-family: "IBM Plex Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: inherit;
+    line-height: 1.5;
+}
+
+.code-editor .cm-s-eclipse .CodeMirror-gutters {
+    background: #f7f9fc;
+    border-right: 1px solid var(--ed-line);
+}
+
+.code-editor .cm-s-eclipse .CodeMirror-activeline-background {
+    background: rgba(11, 102, 194, 0.06);
+}
+
+.code-editor .cm-s-eclipse .CodeMirror-matchingbracket {
+    color: var(--cws-accent) !important;
+    background: rgba(11, 102, 194, 0.12);
+}
+
+.code-editor .cm-matchhighlight {
+    background: rgba(255, 213, 79, 0.35);
+}
+
+.code-editor-fallback {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    resize: none;
+    font-family: "IBM Plex Mono", Menlo, Consolas, monospace;
+    font-size: inherit;
+    tab-size: 4;
+}
+
+.editor-statusbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    padding: 5px 12px;
+    background: var(--ed-bar);
+    border-top: 1px solid var(--ed-line);
+    color: var(--ed-muted);
+    font-size: 12px;
+}
+
+.editor-statusbar .editor-shortcuts {
+    margin-left: auto;
+}
+
+.editor-statusbar kbd {
+    padding: 0 4px;
+    border: 1px solid var(--ed-line);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+}
+
+.editor-over-limit {
+    color: #c62f31;
+    font-weight: 700;
+}
+
+/* Custom input / output */
+.editor-run-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.editor-run-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.editor-run-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    margin-bottom: 6px;
+}
+
+.editor-run-head .editor-label {
+    color: var(--cws-muted);
+}
+
+.editor-io {
+    box-sizing: border-box;
+    width: 100%;
+    height: 180px;
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--cws-line);
+    border-radius: 10px;
+    background: #fbfdff;
+    font-family: "IBM Plex Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre;
+    overflow: auto;
+    resize: vertical;
+    word-wrap: normal;
+}
+
+textarea.editor-io {
+    height: 180px;
+}
+
+pre.editor-io {
+    color: var(--cws-ink);
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.editor-metric {
+    font-size: 12px;
+    color: var(--cws-muted);
+}
+
+#editor-result-details {
+    margin-top: 8px;
+    font-size: 13px;
+}
+
+#editor-result-details summary {
+    cursor: pointer;
+    color: var(--cws-accent);
+    font-weight: 600;
+}
+
+#editor-result-details .editor-details-body {
+    max-height: 320px;
+    overflow: auto;
+    margin-top: 6px;
+}
+
+#editor-message {
+    margin: 14px 0 0;
+}
+
+.editor-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.editor-actions .btn {
+    padding: 8px 22px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+@media (max-width: 767px) {
     .submission-mode-toggle {
-        flex-direction: column;
+        display: flex;
     }
 
     .mode-toggle-btn {
-        width: 100%;
+        flex: 1 1 0;
     }
 
     .code-editor {
-        height: 450px;
+        height: 380px;
     }
 
-    .CodeMirror {
-        font-size: 12px !important;
+    .editor-run-panel {
+        grid-template-columns: 1fr;
+    }
+
+    .editor-workspace select.editor-select {
+        min-width: 0;
+        max-width: 190px;
+    }
+
+    .editor-statusbar .editor-shortcuts {
+        display: none;
+    }
+
+    .editor-actions .btn {
+        flex: 1 1 0;
     }
 }

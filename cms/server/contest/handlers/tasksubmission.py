@@ -95,6 +95,9 @@ class SubmitHandler(ContestHandler):
             self.sql_session.commit()
         except UnacceptableSubmission as e:
             logger.info("Sent error: `%s' - `%s'", e.subject, e.formatted_text)
+            if self.wants_json_response():
+                self.write_json_error(e.subject, e.text, e.text_params)
+                return
             self.notify_error(e.subject, e.text, e.text_params)
         else:
             self.service.evaluation_service.new_submission(
@@ -108,8 +111,12 @@ class SubmitHandler(ContestHandler):
             query_args["submission_id"] = \
                 encrypt_number(submission.id, config.secret_key)
 
-        self.redirect(self.contest_url("tasks", task.name, "submissions",
-                                       **query_args))
+        url = self.contest_url("tasks", task.name, "submissions",
+                               **query_args)
+        if self.wants_json_response():
+            self.write({"success": True, "redirect": url})
+            return
+        self.redirect(url)
 
 
 class TaskSubmissionsHandler(ContestHandler):
@@ -168,6 +175,7 @@ class TaskSubmissionsHandler(ContestHandler):
 
         download_allowed = self.contest.submissions_download_allowed
         self.render("task_submissions.html",
+                    editor_config=self._editor_config(task),
                     task=task, submissions=submissions,
                     public_score=public_score,
                     tokened_score=tokened_score,
@@ -177,6 +185,60 @@ class TaskSubmissionsHandler(ContestHandler):
                     submissions_left=submissions_left,
                     submissions_download_allowed=download_allowed,
                     **self.r_params)
+
+
+    def _editor_config(self, task):
+        """Return the settings of the in-browser code editor.
+
+        The editor is offered only when every file of the submission
+        format is a source file (i.e., ends with ".%l"), since it can
+        only produce source code. It can also compile and run the code
+        on a custom input through the user test machinery, when user
+        tests are allowed and the task needs no user-provided managers.
+
+        return (dict|None): the (JSON-serializable) configuration, or
+            None if the editor must not be offered for this task.
+
+        """
+        files = list(task.submission_format)
+        if len(files) == 0 or not all(f.endswith(".%l") for f in files):
+            return None
+
+        languages = []
+        for language_name in self.contest.languages:
+            try:
+                language = get_language(language_name)
+            except KeyError:
+                logger.warning("Unknown language %s in contest %s.",
+                               language_name, self.contest.name)
+                continue
+            languages.append({
+                "name": language_name,
+                "extension": language.source_extension or ".txt",
+            })
+        if len(languages) == 0:
+            return None
+
+        task_type = task.active_dataset.task_type_object
+        can_run = (self.r_params["testing_enabled"]
+                   and self.r_params["actual_phase"] == 0
+                   and task_type.testable
+                   and not task_type.get_user_managers())
+
+        return {
+            "task": task.name,
+            "contest": self.contest.name,
+            "user": self.current_user.user.username,
+            "files": files,
+            "languages": languages,
+            "max_submission_length": config.max_submission_length,
+            "max_input_length": config.max_input_length,
+            "submit_url": self.contest_url("tasks", task.name, "submit"),
+            "test_url": self.contest_url("tasks", task.name, "test")
+            if can_run else None,
+            "tests_url": self.contest_url("tasks", task.name, "tests")
+            if can_run else None,
+        }
 
 
 class SubmissionStatusHandler(ContestHandler):

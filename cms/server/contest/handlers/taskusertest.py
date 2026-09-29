@@ -148,10 +148,25 @@ class UserTestHandler(ContestHandler):
             raise tornado_web.HTTPError(404)
         except UnacceptableUserTest as e:
             logger.info("Sent error: `%s' - `%s'", e.subject, e.formatted_text)
+            if self.wants_json_response():
+                self.write_json_error(e.subject, e.text, e.text_params)
+                return
             self.notify_error(e.subject, e.text, e.text_params)
         else:
             self.service.evaluation_service.new_user_test(
                 user_test_id=user_test.id)
+            if self.wants_json_response():
+                # The editor polls the test through the usual status,
+                # details and output URLs, which address user tests by
+                # their 1-based chronological index for this task.
+                user_test_num = self.sql_session.query(UserTest) \
+                    .filter(UserTest.participation == self.current_user) \
+                    .filter(UserTest.task == task) \
+                    .filter(UserTest.timestamp <= user_test.timestamp) \
+                    .count()
+                self.write({"success": True,
+                            "user_test_num": user_test_num})
+                return
             self.notify_success(N_("Test received"),
                                 N_("Your test has been received "
                                    "and is currently being executed."))
